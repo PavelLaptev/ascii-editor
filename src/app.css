@@ -1,0 +1,17 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* The editor manages its own scrolling; the page itself never scrolls. */
+  overflow: hidden;
+  background: #12141a;
+  color-scheme: dark;
+}
+
+#app {
+  height: 100%;
+}
