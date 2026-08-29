@@ -1,3 +1,22 @@
+/* Design tokens, straight off the Figma file. There are no Figma variables behind the
+   design, so the raw hexes are named here once and referenced everywhere else. */
+:root {
+  --bg: #1d1d1d;
+  --panel: #383838;
+  --panel-alt: #424242;
+  --accent: #00eaff;
+  --ink: #ffffff;
+  --ink-dim: rgba(255, 255, 255, 0.5);
+  --ink-faint: rgba(255, 255, 255, 0.3);
+  --hairline: rgba(255, 255, 255, 0.4);
+  --row-selected: rgba(255, 255, 255, 0.1);
+
+  --ui-font: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The canvas keeps a system monospace stack: it has to carry box-drawing and block
+     glyphs, which a display webfont can silently drop. */
+  --art-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -8,7 +27,7 @@ body {
   height: 100%;
   /* The editor manages its own scrolling; the page itself never scrolls. */
   overflow: hidden;
-  background: #12141a;
+  background: var(--bg);
   color-scheme: dark;
 }
 

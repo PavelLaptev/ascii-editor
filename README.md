@@ -19,11 +19,35 @@ npm run preview  # serve the production build
 
 No dependencies beyond Svelte and Vite. Everything runs in the browser; nothing is uploaded.
 
+## Layout
+
+The canvas sits alone in the middle; everything else floats above it.
+
+- **Bottom toolbar** — the character swatches on the left, then the tools in three groups:
+  selection, drawing, and the two panel toggles (**Effects**, **Canvas**).
+- **Settings panel**, just above the toolbar — the controls for whatever is armed. It follows
+  the active tool, and **Effects** / **Canvas** / a character swatch take it over while open.
+- **Layers panel**, top right — drag any header in that column to move the whole column, and
+  click a chevron to collapse a panel.
+
+**Characters**, **Effects** and **Canvas** carry a **Pin** button that docks them under Layers,
+so they stay open while you draw instead of being swapped out by the next tool. **Unpin** sends
+one back to the popover. Their toolbar button (or, for characters, the armed swatch) closes
+them wherever they happen to be. Tool settings can't be pinned — they belong to whatever tool
+is armed, so they have nowhere fixed to live.
+
+Undo, redo and the clipboard have no buttons — they're keyboard-only. **Export** and **Clear**
+live at the foot of the **Canvas** panel.
+
 ## Tools
 
 Each tool's shortcut is in parentheses. Shortcuts work whenever the app has focus, except
 while you're typing in a text field (the layer rename box, the canvas size inputs, or the
 character input).
+
+**Path**, **Line**, **Rect** and **Box** share one toolbar button: it shows whichever of them
+is live, and the settings panel switches between them. Their shortcuts still reach each one
+directly.
 
 | Tool | Key | What it does |
 | --- | --- | --- |
@@ -31,12 +55,13 @@ character input).
 | **Brush** | `B` | Freehand, but size and character vary with pen pressure or speed. See [Brush dynamics](#brush-dynamics). |
 | **Eraser** | `E` | Freehand erase to blank. On a layer, blank is transparent — lower layers show through. |
 | **Line** | `L` | Drag a straight line at any angle. Takes a thickness. |
+| **Path** | `D` | Click corner to corner to draw a connected line; glyphs are chosen from each segment's direction. See [Paths](#paths). |
 | **Rect** | `R` | Drag a rectangle of the current character, outline or filled. |
 | **Box** | `O` | Drag a box-drawing frame with proper corners: `ascii`, `single`, `double`, or `round`. |
 | **Fill** | `F` | Flood fill a contiguous region of matching cells (4-way). |
 | **Text** | `T` | Click to place a caret, then type single characters into cells. For big lettering from a real font, use a [text layer](#text-layers) instead. |
 | **Select** | `S` | Select a region and move it. See [Selections](#selections). |
-| **Move** | `V` | Drag anywhere to move the whole active layer. Arrow keys nudge it a cell at a time. A painted layer stops at the canvas edge so cells can't be shifted into oblivion; a text layer isn't limited, since it's rebuilt from its parameters and loses nothing. |
+| **Move** | `V` | Drag anywhere to move the whole active layer. Arrow keys nudge it a cell at a time. Nothing is clamped to the canvas — push a layer as far off the edge as you like and the cells that leave the view are kept, not dropped. |
 
 ### Drawing basics
 
@@ -47,7 +72,43 @@ character input).
   Brush, Eraser, and Line. Even sizes can't centre exactly on a cell, so they extend right and
   down.
 - Strokes are interpolated between pointer samples, so fast drags don't leave gaps.
+- Dragging past the canvas edge keeps tracking along it, and releasing anywhere — outside the
+  canvas or outside the browser — ends the drag cleanly.
 - Every stroke is one undo step, no matter how long.
+
+## Paths
+
+The Path tool draws lines that stay connected around corners. Click each corner in turn; the
+segment to your cursor rubber-bands until the next click pins it down. **Enter**, **Esc**,
+**double-click** or **right-click** releases the line and leaves you on the tool, ready to
+start the next one — nothing is discarded, and switching tools commits what you've clicked so
+far too. Each line is its own undo step.
+
+Each glyph comes from the direction of the segment running through it, so runs join up instead
+of staying stuck as horizontal dashes:
+
+```
+                 ────────                     ───────────────┐
+                /        \                                    │
+               /          \                                   │
+              /            \                                  │
+  ───────────                \                                └───────────────
+                              ─────────────────
+```
+
+- Horizontal runs get `─`, vertical runs `│`, and 45° slopes `/` or `\`.
+- Shallower slopes come out as runs of `─` stepping down with `/`, the way ASCII slopes are
+  drawn by hand — `/───` repeating rather than a jagged staircase.
+- A segment near 45° is drawn entirely with one diagonal. Such a line technically takes the odd
+  axis-aligned step, but a lone `─` sitting in a slope reads as a mistake rather than as the
+  slightly shallower gradient it really is.
+- Where two straight runs meet at a right angle you get a proper corner: `┌ ┐ └ ┘`.
+- The **Style** picker (shared with the Box tool) switches between `single`, `double`, `round`
+  and `ascii` glyph sets, so the same line can be drawn with `═ ║ ╔`, `╭ ╮ ╰`, or plain
+  `- | +`.
+
+Clicking the corners rather than dragging is what makes this reliable: a dragged stroke only
+tells you where the pointer wobbled, while a clicked segment has one exact direction.
 
 ## Characters
 
@@ -55,10 +116,13 @@ The **Character** panel holds two slots — primary and secondary — like Photo
 and background colours.
 
 - **`X`** swaps them.
-- **Click a slot** to make it active; the palette and the text input then write into that slot.
-- The **⇄** button swaps them by mouse.
+- **Click a swatch** to make that slot active and open the palette on it; the palette and the
+  text input then write into that slot. The active slot is outlined in cyan.
 
-The palette is grouped by intent, and groups collapse to keep the sidebar short:
+These are characters, not colours — colour is a property of the layer, not the brush. See
+[Layers](#layers).
+
+Clicking a swatch opens the palette, grouped by intent, with each group collapsible:
 
 | Group | Contents |
 | --- | --- |
@@ -73,18 +137,32 @@ codepoints.
 
 ## Layers
 
-The canvas is a stack of layers, listed top-first in the sidebar. Blank cells are transparent,
-so lower layers show through them.
+The canvas is a stack of layers, listed top-first in the layers panel. Blank cells are
+transparent, so lower layers show through them.
 
-- **`◉`** toggles a layer's visibility.
-- **Click** a name to make that layer active — all drawing goes to the active layer.
+A layer isn't confined to the canvas. It keeps its own cells and its own origin, and the
+canvas is just the window you see them through — so moving a layer half off the edge, or
+shrinking the canvas under it, crops what's displayed without destroying anything. Draw on a
+layer that's been moved and it grows to cover the canvas again, keeping the part still
+outside.
+
+- The **eye** toggles a layer's visibility.
+- **Click** a row to make that layer active — all drawing goes to the active layer.
 - **Double-click** a name to rename it.
-- The button row is **new**, **new text layer** (`T+`), **duplicate**, **move up**,
-  **move down**, **merge down**, and **delete**.
+- **Drag the `⠿` handle** to reorder the stack.
+- **Right-click** a row for rename, duplicate, move up/down, merge down, rasterize, and delete.
+- The footer buttons are **new layer**, **duplicate**, and **delete**. A **new text layer**
+  comes from the Font tool's settings panel.
+- The chip beside each name is the layer's **colour** — click it for a palette, or **Custom**
+  for anything else. Everything the layer draws renders in that colour; new layers start white.
+  The chip is solid for a painted layer and hollow for a [text layer](#text-layers).
 
-Undo captures the whole stack, so adds, deletes, reorders, and merges are all undoable.
-Resizing the canvas resizes every layer together. **Clear** wipes only the active layer, and
-**Import** loads into the active layer.
+Colour is a view property: export is plain text, so it carries characters only. Merging down
+hands the upper layer's cells to the lower layer, and they take on its colour.
+
+Undo captures the whole stack, so adds, deletes, reorders, merges and colour changes are all
+undoable.
+Resizing the canvas resizes every layer together. **Clear** wipes only the active layer.
 
 ## Text layers
 
@@ -156,7 +234,8 @@ The **Transform** panel skews, rotates, adds perspective to, and mirrors the act
   character grid.
 - **Persp X / Persp Y** apply a keystone taper, −0.9 to 0.9: positive **Persp X** narrows the
   top and widens the bottom, as though the art were leaning away from you.
-- **Flip H / Flip V** mirror the layer, swapping directional glyphs as they go — `/` becomes
+- **Flip H / Flip V** mirror the layer about its own bounds — which are the canvas until you
+  move the layer off the edge — swapping directional glyphs as they go: `/` becomes
   `\`, `╮` becomes `╭`, `▌` becomes `▐`.
 
 All of them pivot on the centre of the inked content, so art doesn't wander as you adjust, and
@@ -172,7 +251,7 @@ How it commits depends on the layer:
 - **Painted layers** show a live preview while you drag the sliders, and bake it when you press
   **Apply to layer** — one undo step. You don't have to remember to press it: a preview is
   applied automatically the moment you do anything that would otherwise discard it — draw on
-  the layer, add or switch layers, resize the canvas, or clear. Copy and Download also include
+  the layer, add or switch layers, resize the canvas, or clear. Copy and Export also include
   an unapplied preview, so what you export always matches what's on screen. To discard one
   deliberately, press **reset**.
 - **Text layers** keep every transform as a *parameter*, re-applied after each render. Edit the
@@ -201,6 +280,8 @@ With a selection active:
 | Drag inside it | Move the selected content. |
 | Alt-drag inside it | Duplicate instead of moving. |
 | Arrow keys | Nudge one cell. |
+| `Cmd/Ctrl+C` | Copy it to the clipboard. |
+| `Cmd/Ctrl+X` | Cut it. |
 | `Delete` / `Backspace` | Clear the selected cells. |
 | `Esc` or `Cmd/Ctrl+D` | Deselect. |
 | `Cmd/Ctrl+A` | Select the whole canvas. |
@@ -236,21 +317,45 @@ fast tablet strokes keep the pressure detail a per-frame event would drop.
 
 ## Canvas
 
-- **Cols / Rows** resize the canvas, up to 400 × 200. Content outside the new bounds is cropped.
-- **Zoom** sets the font size.
+- **Cols / Rows** resize the canvas, up to 400 × 200. The canvas is a window onto the layers
+  rather than their extent, so shrinking it crops the view and nothing else — grow it again
+  and the art comes back.
+- **Zoom** sets the font size, 8–56px. `−` and `+` step it from the keyboard.
 - **H space** / **V space** adjust the gap between columns and the row pitch. These are
   **display-only** — they change how the art looks while editing, not what's in the grid, and
   never affect export. **reset** returns them to the defaults.
 - **Show grid** (`G`) toggles cell guides. A highlight also tracks the cell under the cursor,
   sized to the current brush footprint.
+- **Export** saves the flattened canvas as **Txt**, **Png** or **Jpg**. **Clear layer** wipes
+  the active layer only, and is undoable.
 
 ## Files
 
-- **Copy** puts the flattened art on the clipboard. Requires a secure context (`localhost` or
-  HTTPS); a toast reports it if the browser blocks it.
-- **Download** saves it as `ascii-art.txt`.
-- **Import** loads a `.txt` file into the active layer, growing the canvas if the file is
-  bigger. Trailing whitespace is trimmed on export, so lines don't carry padding.
+- **Copy** (`⌘C` / `Ctrl+C`) puts the art on the clipboard. With a selection it copies just
+  that, cropped to its bounding box — an irregular wand selection keeps its shape, with the
+  cells around it blank. With nothing selected it copies the whole flattened canvas. Requires
+  a secure context (`localhost` or HTTPS); a toast reports it if the browser blocks it.
+- **Cut** (`⌘X` / `Ctrl+X`) copies the selection, then clears the cells it covers on the active
+  layer, as one undo step.
+- **Paste** (`⌘V` / `Ctrl+V`) drops clipboard text onto the canvas as a moveable selection —
+  drag it straight away, nudge it with the arrow keys, or press `Esc` to drop the selection.
+  It lands at the current selection's top-left, else the text caret, else the cell under the
+  pointer, else the top-left corner. Blanks in the pasted block are transparent, so pasting art
+  over existing work doesn't punch a rectangular hole through it. Pasting while a text layer is
+  active puts the paste on a new layer of its own, since a text layer regenerates itself. The
+  paste event carries the clipboard directly, so it never needs a permission prompt.
+- **Export** (in the **Canvas** panel) saves the flattened canvas three ways:
+  - **Txt** → `ascii-art.txt`. Characters only; trailing whitespace is trimmed, so lines don't
+    carry padding. Layer colours aren't part of it.
+  - **Png** / **Jpg** → `ascii-art.png` / `.jpg`, drawn at twice the on-screen size. The image
+    is what you see: same zoom, same cell spacing, same per-layer colours, on the canvas
+    background. Neither is written with transparency — JPEG can't carry it, and PNG matches it
+    for consistency.
+
+  All three include an unapplied [transform](#transform) preview, so an export can't hand back
+  art that looks nothing like the canvas.
+
+There is no file import: pasting is the way text gets in.
 
 ## Keyboard reference
 
@@ -260,9 +365,13 @@ fast tablet strokes keep the pressure detail a per-frame event would drop.
 | `X` | Swap primary and secondary characters |
 | `[` `]` | Decrease / increase brush size |
 | `G` | Toggle the grid overlay |
+| `-` `=` | Zoom out / in |
 | `Shift` + drag | Straight line (Pencil, Brush, Eraser) |
 | `Cmd/Ctrl+Z` | Undo (100 steps) |
 | `Shift+Cmd/Ctrl+Z`, `Cmd/Ctrl+Y` | Redo |
+| `Cmd/Ctrl+C` | Copy the selection, or the whole canvas |
+| `Cmd/Ctrl+X` | Cut the selection |
+| `Cmd/Ctrl+V` | Paste clipboard text as a moveable selection |
 | `Cmd/Ctrl+A` | Select all |
 | `Cmd/Ctrl+D`, `Esc` | Deselect |
 | Arrow keys | Nudge the selection, the layer (Move tool), or the text caret |
@@ -308,7 +417,7 @@ knowing if you're extending it:
 - **Undo snapshots clone on capture *and* on restore.** Sharing the arrays would let the next
   edit silently rewrite a history entry.
 - **Shortcuts are bound to the window**, not the canvas, so they still work after clicking a
-  sidebar control; form fields are excluded so typing in them behaves normally.
+  panel control; form fields are excluded so typing in them behaves normally.
 
 [`textRender.js`](src/lib/textRender.js) rasterizes type through a 2D canvas and reduces it to
 cells:

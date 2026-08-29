@@ -392,6 +392,93 @@ const BOX = {
 
 export const BOX_STYLES = Object.keys(BOX)
 
+/**
+ * Turn a click-to-click polyline into connected line glyphs.
+ *
+ * Each segment is rasterised on its own, so its direction is known exactly rather than inferred
+ * from a wobbling pointer: `─` along a horizontal run, `│` down a vertical one, `/` and `\` on
+ * slopes. Bresenham only ever steps sideways, down, or diagonally, so a shallow slope comes out
+ * as a run of `─` with `/` at each step — the way ASCII slopes are drawn by hand.
+ *
+ * Vertices are then resolved against the segments either side of them, which is where the
+ * corner glyphs come from.
+ */
+export function polylineGlyphs(vertices, style = 'single') {
+  const box = BOX[style] ?? BOX.single
+  const diagonal = (dx, dy) => (dx * dy < 0 ? '/' : '\\')
+  const points = vertices.filter(
+    (point, i) => i === 0 || point[0] !== vertices[i - 1][0] || point[1] !== vertices[i - 1][1],
+  )
+  if (!points.length) return []
+  if (points.length === 1) return [[points[0][0], points[0][1], box.h]]
+
+  const glyphFor = (dx, dy) => (dx && dy ? diagonal(dx, dy) : dx ? box.h : box.v)
+  const side = (dx, dy) => (dx ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'down' : 'up')
+  const corners = {
+    'right,down': box.tl, 'down,right': box.tl,
+    'left,down': box.tr, 'down,left': box.tr,
+    'right,up': box.bl, 'up,right': box.bl,
+    'left,up': box.br, 'up,left': box.br,
+  }
+
+  const cells = new Map() // "x,y" -> [x, y, char]; later segments win where they overlap
+  const put = (x, y, ch) => cells.set(`${x},${y}`, [x, y, ch])
+
+  // Each cell takes the glyph of the step that arrives at it; the first takes the step leaving.
+  const segments = []
+  for (let i = 0; i < points.length - 1; i++) {
+    const [x0, y0] = points[i]
+    const [x1, y1] = points[i + 1]
+    const run = linePoints(x0, y0, x1, y1)
+    segments.push(run)
+
+    // A segment near 45° is drawn entirely with one diagonal. Bresenham gives such a line the
+    // odd axis-aligned step, and a lone `─` sitting in a slope reads as a mistake rather than
+    // as the shallower gradient it technically is.
+    const dx = Math.abs(x1 - x0)
+    const dy = Math.abs(y1 - y0)
+    const uniform =
+      dx && dy && Math.min(dx, dy) / Math.max(dx, dy) >= 0.5
+        ? diagonal(Math.sign(x1 - x0), Math.sign(y1 - y0))
+        : null
+
+    run.forEach(([x, y], j) => {
+      if (uniform) return put(x, y, uniform)
+      const [fx, fy] = j === 0 ? run[0] : run[j - 1]
+      const [tx, ty] = j === 0 ? run[Math.min(1, run.length - 1)] : run[j]
+      put(x, y, glyphFor(Math.sign(tx - fx), Math.sign(ty - fy)))
+    })
+  }
+
+  // Interior vertices: join the direction arriving with the direction leaving.
+  for (let i = 1; i < points.length - 1; i++) {
+    const before = segments[i - 1]
+    const after = segments[i]
+    if (before.length < 2 || after.length < 2) continue
+    const [px, py] = before[before.length - 2]
+    const [vx, vy] = points[i]
+    const [nx, ny] = after[1]
+    const into = [Math.sign(vx - px), Math.sign(vy - py)]
+    const outOf = [Math.sign(nx - vx), Math.sign(ny - vy)]
+
+    if (into[0] === outOf[0] && into[1] === outOf[1]) continue // straight through
+    const intoDiagonal = into[0] && into[1]
+    const outDiagonal = outOf[0] && outOf[1]
+    if (intoDiagonal && outDiagonal) {
+      put(vx, vy, into[0] * into[1] === outOf[0] * outOf[1] ? diagonal(...into) : box.h)
+    } else if (intoDiagonal || outDiagonal) {
+      // A slope meeting a flat run: the flat glyph carries the join more cleanly.
+      const straight = intoDiagonal ? outOf : into
+      put(vx, vy, glyphFor(straight[0], straight[1]))
+    } else {
+      const back = side(-into[0], -into[1])
+      put(vx, vy, corners[`${back},${side(outOf[0], outOf[1])}`] ?? box.h)
+    }
+  }
+
+  return [...cells.values()]
+}
+
 /** Box outline as [x, y, char] triples, picking the right corner/edge glyph. */
 export function boxCells(x0, y0, x1, y1, style) {
   const b = BOX[style] ?? BOX.single
