@@ -1,6 +1,8 @@
-# ASCII Editor
+# Askew
 
-A layered ASCII art editor built with Svelte 5 and Vite. Draw with characters instead of
+**An ASCII graphics tool.**
+
+Askew is a layered ASCII art editor built with Svelte 5 and Vite. Draw with characters instead of
 pixels: freehand and shape tools, a pressure-sensitive brush for pen tablets, layers with
 transparency, selections you can move, and plain-text export.
 
@@ -279,6 +281,7 @@ With a selection active:
 | --- | --- |
 | Drag inside it | Move the selected content. |
 | Alt-drag inside it | Duplicate instead of moving. |
+| Shift-drag or Shift-click | Add another rectangle or object to the selection. |
 | Arrow keys | Nudge one cell. |
 | `Cmd/Ctrl+C` | Copy it to the clipboard. |
 | `Cmd/Ctrl+X` | Cut it. |
@@ -366,7 +369,7 @@ There is no file import: pasting is the way text gets in.
 | `[` `]` | Decrease / increase brush size |
 | `G` | Toggle the grid overlay |
 | `-` `=` | Zoom out / in |
-| `Shift` + drag | Straight line (Pencil, Brush, Eraser) |
+| `Shift` + drag | Straight line (Pencil, Brush, Eraser); add to the selection (Select) |
 | `Cmd/Ctrl+Z` | Undo (100 steps) |
 | `Shift+Cmd/Ctrl+Z`, `Cmd/Ctrl+Y` | Redo |
 | `Cmd/Ctrl+C` | Copy the selection, or the whole canvas |
