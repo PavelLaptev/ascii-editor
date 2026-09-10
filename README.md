@@ -32,9 +32,11 @@ The canvas sits alone in the middle; everything else floats above it.
 - **Layers panel**, top right — drag any header in that column to move the whole column, and
   click a chevron to collapse a panel.
 
-**Characters**, **Effects** and **Canvas** carry a **Pin** button that docks them under Layers,
-so they stay open while you draw instead of being swapped out by the next tool. **Unpin** sends
-one back to the popover. Their toolbar button (or, for characters, the armed swatch) closes
+The settings panel opens above whichever toolbar button called for it. **Characters**,
+**Effects** and **Canvas** carry an **Unpin** button that floats them into the dock under
+Layers, so they stay open while you draw instead of being swapped out by the next tool; dragging
+the panel's header does the same and drops it wherever you let go. **Pin** sends one back above
+the toolbar. Their toolbar button (or, for characters, the armed swatch) closes
 them wherever they happen to be. Tool settings can't be pinned — they belong to whatever tool
 is armed, so they have nowhere fixed to live.
 
@@ -47,9 +49,12 @@ Each tool's shortcut is in parentheses. Shortcuts work whenever the app has focu
 while you're typing in a text field (the layer rename box, the canvas size inputs, or the
 character input).
 
-**Path**, **Line**, **Rect** and **Box** share one toolbar button: it shows whichever of them
-is live, and the settings panel switches between them. Their shortcuts still reach each one
-directly.
+**Path**, **Line**, **Rect**, **Box**, **Ellipse**, **Triangle** and **Diamond** share one
+toolbar button: it shows whichever of them is live, and the settings panel switches between
+them. Their shortcuts still reach each one directly. Hold **Shift** while dragging a shape to
+constrain it: a square, a circle, an equilateral triangle, or a line snapped to horizontal,
+vertical or the diagonal. "Square" and "circle" mean on screen, so the constraint accounts for
+cells being taller than they are wide.
 
 | Tool | Key | What it does |
 | --- | --- | --- |
@@ -60,6 +65,9 @@ directly.
 | **Path** | `D` | Click corner to corner to draw a connected line; glyphs are chosen from each segment's direction. See [Paths](#paths). |
 | **Rect** | `R` | Drag a rectangle of the current character, outline or filled. |
 | **Box** | `O` | Drag a box-drawing frame with proper corners: `ascii`, `single`, `double`, or `round`. |
+| **Ellipse** | `C` | Drag an ellipse of the current character, outline or filled. |
+| **Triangle** | | Drag an isosceles triangle pointing up, down, left or right, outline or filled. |
+| **Diamond** | | Drag a diamond of the current character, outline or filled. |
 | **Fill** | `F` | Flood fill a contiguous region of matching cells (4-way). |
 | **Text** | `T` | Click to place a caret, then type single characters into cells. For big lettering from a real font, use a [text layer](#text-layers) instead. |
 | **Select** | `S` | Select a region and move it. See [Selections](#selections). |
@@ -364,12 +372,12 @@ There is no file import: pasting is the way text gets in.
 
 | Key | Action |
 | --- | --- |
-| `P` `B` `E` `L` `R` `O` `F` `T` `S` `V` | Pencil, Brush, Eraser, Line, Rect, Box, Fill, Text, Select, Move |
+| `P` `B` `E` `L` `R` `O` `C` `F` `T` `S` `V` | Pencil, Brush, Eraser, Line, Rect, Box, Ellipse, Fill, Text, Select, Move |
 | `X` | Swap primary and secondary characters |
 | `[` `]` | Decrease / increase brush size |
 | `G` | Toggle the grid overlay |
 | `-` `=` | Zoom out / in |
-| `Shift` + drag | Straight line (Pencil, Brush, Eraser); add to the selection (Select) |
+| `Shift` + drag | Straight line (Pencil, Brush, Eraser); square, circle, equilateral or snapped line (shapes); add to the selection (Select) |
 | `Cmd/Ctrl+Z` | Undo (100 steps) |
 | `Shift+Cmd/Ctrl+Z`, `Cmd/Ctrl+Y` | Redo |
 | `Cmd/Ctrl+C` | Copy the selection, or the whole canvas |

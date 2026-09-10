@@ -347,6 +347,99 @@ export function rectPoints(x0, y0, x1, y1, filled) {
   return points
 }
 
+/**
+ * Cells of the ellipse inscribed in the box (x0, y0)–(x1, y1), inclusive. Outline cells are
+ * the inside cells with an outside neighbour, which keeps the ring one cell thick on the flat
+ * runs and 8-connected on the curves, like any rasterised circle.
+ */
+export function ellipsePoints(x0, y0, x1, y1, filled) {
+  const left = Math.min(x0, x1)
+  const right = Math.max(x0, x1)
+  const top = Math.min(y0, y1)
+  const bottom = Math.max(y0, y1)
+  const cx = (left + right) / 2
+  const cy = (top + bottom) / 2
+  // Half a cell of slack so the edge cells count as inside and a 1×1 drag still draws.
+  const rx = (right - left) / 2 + 0.5
+  const ry = (bottom - top) / 2 + 0.5
+  const inside = (x, y) => ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1
+  const points = []
+  for (let y = top; y <= bottom; y++) {
+    for (let x = left; x <= right; x++) {
+      if (!inside(x, y)) continue
+      const edge =
+        !inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1)
+      if (filled || edge) points.push([x, y])
+    }
+  }
+  return points
+}
+
+/**
+ * Cells of a closed polygon through integer `vertices`: the outline is one line per edge,
+ * and filling adds every cell whose centre a scanline finds inside (even-odd rule).
+ */
+export function polygonPoints(vertices, filled) {
+  const cells = new Map()
+  const add = ([x, y]) => cells.set(`${x},${y}`, [x, y])
+  const n = vertices.length
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = vertices[i]
+    const [bx, by] = vertices[(i + 1) % n]
+    linePoints(ax, ay, bx, by).forEach(add)
+  }
+  if (filled) {
+    const ys = vertices.map(([, y]) => y)
+    for (let y = Math.min(...ys); y <= Math.max(...ys); y++) {
+      const xs = []
+      for (let i = 0; i < n; i++) {
+        const [ax, ay] = vertices[i]
+        const [bx, by] = vertices[(i + 1) % n]
+        // Half-open in y, so a vertex shared by two edges is crossed exactly once.
+        if ((ay <= y && by > y) || (by <= y && ay > y)) {
+          xs.push(ax + ((y - ay) / (by - ay)) * (bx - ax))
+        }
+      }
+      xs.sort((a, b) => a - b)
+      for (let i = 0; i + 1 < xs.length; i += 2) {
+        for (let x = Math.ceil(xs[i]); x <= Math.floor(xs[i + 1]); x++) add([x, y])
+      }
+    }
+  }
+  return [...cells.values()]
+}
+
+/** Corners of an isosceles triangle filling the box, pointing `direction`: up, down, left or right. */
+export function triangleVertices(x0, y0, x1, y1, direction = 'up') {
+  const left = Math.min(x0, x1)
+  const right = Math.max(x0, x1)
+  const top = Math.min(y0, y1)
+  const bottom = Math.max(y0, y1)
+  const cx = Math.round((left + right) / 2)
+  const cy = Math.round((top + bottom) / 2)
+  switch (direction) {
+    case 'down':
+      return [[left, top], [right, top], [cx, bottom]]
+    case 'left':
+      return [[left, cy], [right, top], [right, bottom]]
+    case 'right':
+      return [[left, top], [right, cy], [left, bottom]]
+    default:
+      return [[cx, top], [right, bottom], [left, bottom]]
+  }
+}
+
+/** Corners of a diamond filling the box: one vertex on the middle of each side. */
+export function diamondVertices(x0, y0, x1, y1) {
+  const left = Math.min(x0, x1)
+  const right = Math.max(x0, x1)
+  const top = Math.min(y0, y1)
+  const bottom = Math.max(y0, y1)
+  const cx = Math.round((left + right) / 2)
+  const cy = Math.round((top + bottom) / 2)
+  return [[cx, top], [right, cy], [cx, bottom], [left, cy]]
+}
+
 const BOX = {
   ascii: { h: '-', v: '|', tl: '+', tr: '+', bl: '+', br: '+' },
   single: { h: '─', v: '│', tl: '┌', tr: '┐', bl: '└', br: '┘' },

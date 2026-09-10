@@ -4,6 +4,8 @@
     BOX_STYLES,
     boxCells,
     brushPoints,
+    diamondVertices,
+    ellipsePoints,
     cloneGrid,
     contentBounds,
     flipGrid,
@@ -12,10 +14,12 @@
     linePoints,
     makeGrid,
     objectPoints,
+    polygonPoints,
     polylineGlyphs,
     rectPoints,
     transformGrid,
-    strokePoints
+    strokePoints,
+    triangleVertices
   } from "./ascii.js";
   import { FONTS, TEXT_DEFAULTS, loadFont, renderText } from "./textRender.js";
   import { loadSession, saveSession } from "./storage.js";
@@ -597,7 +601,9 @@
   let boxStyle = $state(
     BOX_STYLES.includes(prefs.boxStyle) ? prefs.boxStyle : "single"
   );
-  let filled = $state(false);
+  let filled = $state(false); // rect, ellipse, triangle and diamond: solid rather than outline
+  let triangleDir = $state("up");
+  let constrain = $state(false); // Shift during a shape drag: square, circle, equilateral, 45°
   let sameCharOnly = $state(false); // magic wand: stop at a different character, not just at blanks
   let pressureSize = $state(true);
   let pressureDensity = $state(true);
@@ -649,7 +655,7 @@
 
   const cellH = $derived(Math.max(1, Math.round(fontSize * lineHeight)));
   const isShape = $derived(
-    tool === "line" || tool === "rect" || tool === "box"
+    ["line", "rect", "box", "ellipse", "triangle", "diamond"].includes(tool)
   );
   const isPath = $derived(tool === "path");
   const isBrush = $derived(
@@ -736,7 +742,7 @@
     }
     if (!dragging || !start || !end) return [];
     const [x0, y0] = start;
-    const [x1, y1] = end;
+    const [x1, y1] = constrain && isShape ? constrainEnd(x0, y0, ...end) : end;
     const ch = strokeChar ?? char;
 
     // Shift-constrained freehand: one straight line from the press to the pointer.
@@ -762,8 +768,49 @@
     }
     if (tool === "rect")
       return rectPoints(x0, y0, x1, y1, filled).map(([x, y]) => [x, y, ch]);
+    if (tool === "ellipse")
+      return ellipsePoints(x0, y0, x1, y1, filled).map(([x, y]) => [x, y, ch]);
+    if (tool === "triangle")
+      return polygonPoints(
+        triangleVertices(x0, y0, x1, y1, triangleDir),
+        filled
+      ).map(([x, y]) => [x, y, ch]);
+    if (tool === "diamond")
+      return polygonPoints(diamondVertices(x0, y0, x1, y1), filled).map(
+        ([x, y]) => [x, y, ch]
+      );
     return boxCells(x0, y0, x1, y1, boxStyle);
   });
+
+  /**
+   * Where the drag end lands with Shift held. Cells aren't square, so "square" and "circle"
+   * mean equal on screen, measured with the current cell pitch: a rect, box, ellipse or
+   * diamond gets equal sides, a triangle becomes equilateral, and a line snaps to
+   * horizontal, vertical or the screen diagonal.
+   */
+  function constrainEnd(x0, y0, x1, y1) {
+    const sx = x1 >= x0 ? 1 : -1;
+    const sy = y1 >= y0 ? 1 : -1;
+    const wx = (Math.abs(x1 - x0) + 1) * cellW; // on-screen extent of the box, in px
+    const wy = (Math.abs(y1 - y0) + 1) * cellH;
+    if (tool === "line") {
+      const angle = Math.atan2(wy, wx);
+      if (angle < Math.PI / 8) return [x1, y0];
+      if (angle > (3 * Math.PI) / 8) return [x0, y1];
+    }
+    // Height over width the shape wants on screen: 1 for square, √3/2 for an equilateral
+    // triangle standing on its base, and the inverse when it lies on its side.
+    const ratio =
+      tool !== "triangle"
+        ? 1
+        : triangleDir === "up" || triangleDir === "down"
+          ? Math.sqrt(3) / 2
+          : 2 / Math.sqrt(3);
+    const size = Math.max(wx, wy / ratio);
+    const dx = Math.max(0, Math.round(size / cellW) - 1);
+    const dy = Math.max(0, Math.round((size * ratio) / cellH) - 1);
+    return [x0 + sx * dx, y0 + sy * dy];
+  }
 
   /** The active layer with any in-flight edit applied, or null when nothing is in progress. */
   const previewLayer = $derived.by(() => {
@@ -1202,6 +1249,7 @@
     // the edge when the pointer leaves it.
     hover = cellFromEvent(event);
     if (!dragging) return;
+    constrain = event.shiftKey;
     const cell = hover ?? cellFromEvent(event, { clamp: true });
     if (!cell) return;
     if (tool === "move") {
@@ -1257,6 +1305,7 @@
     if (tool === "select") finishSelectDrag();
     if (tool === "move") commitLayerShift();
     straightMode = false;
+    constrain = false;
     dragging = false;
     start = null;
     end = null;
@@ -1357,6 +1406,7 @@
   };
 
   function onKeyDown(event) {
+    if (event.key === "Shift" && dragging) constrain = true;
     // Bound to the window so shortcuts work after clicking a panel control, but form
     // fields (the layer rename box, size inputs, the character slot) keep their own keys.
     const target = event.target;
@@ -1511,6 +1561,7 @@
       l: "line",
       r: "rect",
       o: "box",
+      c: "ellipse",
       f: "fill",
       t: "text",
       s: "select",
@@ -1902,7 +1953,7 @@
       label: "Path",
       key: "D",
       icon: "path",
-      hint: "Path, line, rectangle and box"
+      hint: "Path, line, rectangle, box, ellipse, triangle and diamond"
     },
     {
       id: "text",
@@ -1919,10 +1970,13 @@
    * them. Their old keyboard shortcuts still reach each one directly.
    */
   const SHAPES = [
-    { id: "path", label: "Path", key: "D" },
-    { id: "line", label: "Line", key: "L" },
-    { id: "rect", label: "Rect", key: "R" },
-    { id: "box", label: "Box", key: "O" }
+    { id: "path", label: "Path", key: "D", icon: "shape-path" },
+    { id: "line", label: "Line", key: "L", icon: "shape-line" },
+    { id: "rect", label: "Rect", key: "R", icon: "shape-rect" },
+    { id: "box", label: "Box", key: "O", icon: "shape-box" },
+    { id: "ellipse", label: "Ellipse", key: "C", icon: "shape-ellipse" },
+    { id: "triangle", label: "Triangle", key: "", icon: "shape-triangle" },
+    { id: "diamond", label: "Diamond", key: "", icon: "shape-diamond" }
   ];
   let lastShape = $state("path");
   const inShapeGroup = $derived(SHAPES.some((s) => s.id === tool));
@@ -1944,7 +1998,7 @@
   };
 
   // Panel names, in dock order top to bottom. Layers starts docked, where it always lived;
-  // its toolbar button hides it and Unpin moves it into the popover like any other panel.
+  // its toolbar button hides it and Pin moves it into the popover like any other panel.
   // A restored session keeps whatever arrangement it was left in.
   let pinned = $state(
     (prefs.pinned ?? ["layers"]).filter((name) => name in PINNABLE)
@@ -1952,6 +2006,44 @@
 
   /** What the floating panel above the toolbar shows. 'tool' follows the armed tool. */
   let panel = $state("tool");
+  let toolbarEl = $state(null);
+  let settingsEl = $state(null);
+  // Popover left edge in page pixels; null falls back to centred over the toolbar.
+  let popoverLeft = $state(null);
+
+  /**
+   * Park the popover above the toolbar button that owns what it shows — the armed tool, the
+   * swatch, or a panel toggle — and keep it on screen at the edges.
+   */
+  function placePopover() {
+    if (!toolbarEl || !settingsEl) return;
+    const name = panel === "tool" ? (inShapeGroup ? "shape" : tool) : panel;
+    const anchor = toolbarEl.querySelector(`[data-anchor="${name}"]`);
+    if (!anchor) {
+      popoverLeft = null;
+      return;
+    }
+    const a = anchor.getBoundingClientRect();
+    const width = settingsEl.offsetWidth;
+    const margin = 12;
+    popoverLeft = Math.round(
+      Math.max(
+        margin,
+        Math.min(window.innerWidth - width - margin, a.left + a.width / 2 - width / 2)
+      )
+    );
+  }
+
+  $effect(() => {
+    // Re-park whenever what the popover shows changes, and whenever its own size does — a
+    // brush panel is wider than a pencil one, and the anchor is measured against the width.
+    void [panel, tool, inShapeGroup];
+    if (!settingsEl) return;
+    placePopover();
+    const observer = new ResizeObserver(placePopover);
+    observer.observe(settingsEl);
+    return () => observer.disconnect();
+  });
   const hasToolSettings = $derived(tool !== "move" && tool !== "fill");
   // Hidden is a one-shot dismissal of the popover: it survives until the user asks for a
   // panel again, so a panel that covers the artwork can be pushed out of the way in place.
@@ -2036,6 +2128,7 @@
 
   function startPanelDrag(event) {
     if (event.button !== 0 || event.target.closest("button")) return;
+    event.preventDefault(); // no text selection sweeping across the panels under the drag
     panelDrag = {
       dx: event.clientX - panelPos.x,
       dy: event.clientY - panelPos.y
@@ -2053,6 +2146,53 @@
   }
 
   const endPanelDrag = () => (panelDrag = null);
+
+  // Dragging the popover's header tears the panel off: a few pixels in, it is unpinned onto
+  // the top of the dock and the dock follows the pointer from there, so the header the user
+  // grabbed stays under the cursor throughout.
+  let tearOff = null; // { name, x, y, dx, dy } from press until it tears or is released
+  function startTearOff(event) {
+    if (event.button !== 0 || event.target.closest("button")) return;
+    event.preventDefault();
+    const head = event.currentTarget.getBoundingClientRect();
+    tearOff = {
+      name: panel,
+      x: event.clientX,
+      y: event.clientY,
+      // The grab point within the header, capped so it still lands inside the narrower dock.
+      dx: Math.min(event.clientX - head.left, DOCK_WIDTH - 40),
+      dy: event.clientY - head.top
+    };
+    window.addEventListener("pointermove", moveTearOff);
+    window.addEventListener("pointerup", endTearOff, { once: true });
+  }
+  function moveTearOff(event) {
+    if (!tearOff) return;
+    if (Math.hypot(event.clientX - tearOff.x, event.clientY - tearOff.y) < 6) return;
+    const { name, dx, dy } = tearOff;
+    endTearOff();
+    pinned = [name, ...pinned.filter((n) => n !== name)];
+    panel = "tool";
+    panelHidden = false;
+    panelPos = { x: event.clientX - dx, y: event.clientY - dy };
+    clampPanel();
+    // Hand the rest of the gesture to the dock drag; the pointer was never captured by a
+    // dock header, so the window carries the events until release.
+    panelDrag = { dx, dy };
+    window.addEventListener("pointermove", movePanelDrag);
+    window.addEventListener(
+      "pointerup",
+      () => {
+        endPanelDrag();
+        window.removeEventListener("pointermove", movePanelDrag);
+      },
+      { once: true }
+    );
+  }
+  function endTearOff() {
+    tearOff = null;
+    window.removeEventListener("pointermove", moveTearOff);
+  }
 
   // The dock — every pinned panel — moves as one column, so every header in it drags the
   // same position.
@@ -2188,12 +2328,16 @@
   onkeydown={onKeyDown}
   onkeyup={(e) => {
     if (e.code === "Space") spaceHeld = false;
+    if (e.key === "Shift") constrain = false;
   }}
   onblur={() => (spaceHeld = false)}
   onpaste={onPaste}
   onpointerup={onPointerUp}
   onpointercancel={onPointerUp}
-  onresize={clampPanel}
+  onresize={() => {
+    clampPanel();
+    placePopover();
+  }}
   onbeforeunload={flushSave}
   onclick={closeMenus}
 />
@@ -2353,6 +2497,7 @@
         <span class="value">{transformValue(t.key)}</span>
       </label>
     {/each}
+    <hr class="sep" />
     <div class="field">
       <span class="label">Flip</span>
       <div class="segmented">
@@ -2398,6 +2543,7 @@
         onchange={applySize}
       />
     </div>
+    <hr class="sep" />
     <label
       class="field"
       title="Glyph size in pixels — part of the artwork, unlike the view zoom (− and + to step)"
@@ -2440,6 +2586,7 @@
       </label>
       <button class="ghost value" onclick={resetSpacing}>Reset spacing</button>
     </div>
+    <hr class="sep" />
     <div class="field">
       <span class="label">Export</span>
       <div class="segmented">
@@ -2456,6 +2603,7 @@
         >
       </div>
     </div>
+    <hr class="sep" />
     <div class="field">
       <div class="segmented">
         <button onclick={clearAll} title="Clear the active layer"
@@ -2517,6 +2665,7 @@
           />
           <span class="value">{activeText.size}</span>
         </label>
+        <hr class="sep" />
         <div class="field">
           <span class="label">Align</span>
           <div class="segmented">
@@ -2604,6 +2753,7 @@
           />
           <span class="value">{activeText.lineSpacing}</span>
         </label>
+        <hr class="sep" />
         <div class="field" title="Column and row of the first line's cap line">
           <span class="label">Position</span>
           <input
@@ -2650,18 +2800,21 @@
         >
       {/if}
     {:else if inShapeGroup}
-      <div class="field">
-        <span class="label">Shape</span>
-        <div class="segmented">
-          {#each SHAPES as s}
-            <button
-              class:active={tool === s.id}
-              onclick={() => pickTool(s.id)}
-            >
-              {s.label} <em>{s.key}</em>
-            </button>
-          {/each}
-        </div>
+      <!-- One icon per shape: seven words don't fit the dock, and the panel title already
+           names whichever is live. -->
+      <div class="field shape-row" role="group" aria-label="Shape">
+        {#each SHAPES as s}
+          <button
+            class="shape-btn"
+            class:active={tool === s.id}
+            title={s.key ? `${s.label} (${s.key})` : s.label}
+            aria-label={s.label}
+            aria-pressed={tool === s.id}
+            onclick={() => pickTool(s.id)}
+          >
+            <Icon name={s.icon} size={20} />
+          </button>
+        {/each}
       </div>
       {#if tool === "path" || tool === "box"}
         <div class="field">
@@ -2671,10 +2824,37 @@
           </select>
         </div>
       {/if}
-      {#if tool === "rect"}
+      {#if tool === "triangle"}
+        <div class="field">
+          <span class="label">Points</span>
+          <div class="segmented">
+            {#each [["up", "↑"], ["down", "↓"], ["left", "←"], ["right", "→"]] as [d, arrow]}
+              <button
+                class="arrow"
+                class:active={triangleDir === d}
+                title={d}
+                aria-label={d}
+                onclick={() => (triangleDir = d)}>{arrow}</button
+              >
+            {/each}
+          </div>
+        </div>
+      {/if}
+      {#if ["rect", "ellipse", "triangle", "diamond"].includes(tool)}
         <label class="check"
           ><input type="checkbox" bind:checked={filled} /> Filled</label
         >
+      {/if}
+      {#if tool !== "path"}
+        <p class="note">
+          {tool === "line"
+            ? "Hold Shift to snap to horizontal, vertical or diagonal."
+            : tool === "triangle"
+              ? "Hold Shift for an equilateral triangle."
+              : tool === "ellipse"
+                ? "Hold Shift for a circle."
+                : "Hold Shift for a square."}
+        </p>
       {/if}
       {#if tool === "line"}
         <label class="field" title="Brush size ([ and ])">
@@ -2698,6 +2878,7 @@
         <span class="value">{brushSize}×{brushSize}</span>
       </label>
       {#if tool === "brush"}
+        <hr class="sep" />
         <div class="field" title="What varies the brush as you draw">
           <span class="label">Dynamics</span>
           <div class="segmented">
@@ -2844,8 +3025,8 @@
             <span class="panel-title">{panelTitle(name)}</span>
             <button
               class="pin"
-              title="Put this panel back above the toolbar"
-              onclick={() => unpinPanel(name)}>Unpin</button
+              title="Pin this panel back above the toolbar"
+              onclick={() => unpinPanel(name)}>Pin</button
             >
           </div>
           {#if !collapsed[name]}
@@ -2931,15 +3112,21 @@
   {#if toast}<div class="toast">{toast}</div>{/if}
 
   {#if panelOpen}
-    <div class="panel settings">
+    <div
+      class="panel settings"
+      class:anchored={popoverLeft !== null}
+      style={popoverLeft !== null ? `left:${popoverLeft}px` : ""}
+      bind:this={settingsEl}
+    >
       {#if PINNABLE[panel]}
-        <div class="settings-head">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="settings-head" onpointerdown={startTearOff}>
           <span class="panel-title">{panelTitle(panel)}</span>
           <div class="head-actions">
             <button
               class="pin"
-              title="Dock this panel on the right"
-              onclick={() => pinPanel(panel)}>Pin</button
+              title="Unpin this panel into the dock on the right — or drag the header"
+              onclick={() => pinPanel(panel)}>Unpin</button
             >
             <button
               class="pin hide"
@@ -2958,7 +3145,7 @@
     </div>
   {/if}
 
-  <div class="toolbar">
+  <div class="toolbar" bind:this={toolbarEl} onscroll={placePopover}>
     <div class="chars">
       <span
         class="swatch back"
@@ -2967,6 +3154,7 @@
       >
       <button
         class="swatch front"
+        data-anchor="char"
         title="Primary character — drawn with the left button"
         onclick={pickChar}>{showChar(char)}</button
       >
@@ -2987,6 +3175,7 @@
         <button
           class="tool"
           class:active={tool === t.id}
+          data-anchor={t.id}
           title={t.hint}
           onclick={() => pickTool(t.id)}
         >
@@ -3004,6 +3193,7 @@
         <button
           class="tool"
           class:active={isShapeButton ? inShapeGroup : tool === t.id}
+          data-anchor={t.id}
           title={t.hint}
           onclick={() => pickTool(t.id)}
         >
@@ -3023,6 +3213,7 @@
         class="tool"
         class:active={panelPopped("layers")}
         class:open={pinned.includes("layers")}
+        data-anchor="layers"
         title="Show or hide the layer stack"
         onclick={() => togglePanel("layers")}
       >
@@ -3033,6 +3224,7 @@
         class="tool"
         class:active={panelPopped("effects")}
         class:open={pinned.includes("effects")}
+        data-anchor="effects"
         title="Skew, rotate, flip and keystone the active layer"
         onclick={() => togglePanel("effects")}
       >
@@ -3043,6 +3235,7 @@
         class="tool"
         class:active={panelPopped("canvas")}
         class:open={pinned.includes("canvas")}
+        data-anchor="canvas"
         title="Canvas size, type size and cell spacing"
         onclick={() => togglePanel("canvas")}
       >
@@ -3486,10 +3679,16 @@
     display: flex;
     flex-direction: column;
   }
+  /* Once measured, the popover sits over the button that opened it; see placePopover. */
+  .settings.anchored {
+    transform: none;
+  }
   .settings-head {
     display: flex;
     align-items: center;
     gap: 10px;
+    cursor: grab;
+    touch-action: none;
     /* The buttons sit flush in the corner: right gutter matches the 10px above them. */
     padding: 10px 10px 10px 16px;
     border-bottom: 1px solid var(--divider);
@@ -3585,6 +3784,16 @@
     min-width: 4ch;
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  /* Hairline between groups of settings, so a long panel reads as blocks, not one stack. */
+  .sep {
+    width: 100%;
+    margin: 6px 0;
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .dock .sep {
+    margin: 2px 0;
   }
   .note {
     margin: 0;
@@ -3738,6 +3947,35 @@
     opacity: 1;
   }
   .segmented button.active {
+    background: var(--accent);
+    color: #000;
+    opacity: 1;
+  }
+  /* Arrow-only segments: a fixed square rather than text padding. */
+  .segmented button.arrow {
+    width: 30px;
+    padding: 6px 0;
+    font-size: 13px;
+  }
+  .shape-row {
+    gap: 2px;
+  }
+  .shape-btn {
+    width: 32px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.08);
+    border: none;
+    opacity: 0.7;
+    cursor: pointer;
+  }
+  .shape-btn:hover {
+    opacity: 1;
+  }
+  .shape-btn.active {
     background: var(--accent);
     color: #000;
     opacity: 1;
