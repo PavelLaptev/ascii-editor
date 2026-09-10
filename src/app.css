@@ -9,6 +9,7 @@
   --ink-dim: rgba(255, 255, 255, 0.5);
   --ink-faint: rgba(255, 255, 255, 0.3);
   --hairline: rgba(255, 255, 255, 0.4);
+  --divider: rgba(255, 255, 255, 0.12);
   --row-selected: rgba(255, 255, 255, 0.1);
 
   --ui-font: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;

@@ -10,17 +10,6 @@ export function cloneGrid(grid) {
   return grid.map((row) => row.slice())
 }
 
-/** Resize a grid, keeping the top-left content that still fits. */
-export function resizeGrid(grid, cols, rows) {
-  const next = makeGrid(cols, rows)
-  for (let y = 0; y < Math.min(rows, grid.length); y++) {
-    for (let x = 0; x < Math.min(cols, grid[y].length); x++) {
-      next[y][x] = grid[y][x]
-    }
-  }
-  return next
-}
-
 /** Bounding box of the non-blank cells, or null when the grid is empty. */
 export function contentBounds(grid) {
   let minX = Infinity
@@ -37,21 +26,6 @@ export function contentBounds(grid) {
     }
   }
   return maxX === -Infinity ? null : { minX, minY, maxX, maxY }
-}
-
-/** A copy of the grid with all content shifted by (dx, dy); anything pushed off is dropped. */
-export function shiftGrid(grid, dx, dy) {
-  const rows = grid.length
-  const cols = grid[0]?.length ?? 0
-  const out = makeGrid(cols, rows)
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const ny = y + dy
-      const nx = x + dx
-      if (ny >= 0 && ny < rows && nx >= 0 && nx < cols) out[ny][nx] = grid[y][x]
-    }
-  }
-  return out
 }
 
 // A character cell is about twice as tall as it is wide, so rotation has to happen in
@@ -298,16 +272,6 @@ export function gridToText(grid, { trim = true } = {}) {
   if (!trim) return lines.join('\n')
   while (lines.length && lines[lines.length - 1] === '') lines.pop()
   return lines.join('\n')
-}
-
-export function textToGrid(text, cols, rows) {
-  const grid = makeGrid(cols, rows)
-  const lines = text.replace(/\r\n?/g, '\n').split('\n')
-  for (let y = 0; y < Math.min(rows, lines.length); y++) {
-    const chars = [...lines[y]]
-    for (let x = 0; x < Math.min(cols, chars.length); x++) grid[y][x] = chars[x]
-  }
-  return grid
 }
 
 /** Bresenham line, returned as [x, y] cells. */

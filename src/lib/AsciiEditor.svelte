@@ -5,6 +5,7 @@
     boxCells,
     brushPoints,
     cloneGrid,
+    contentBounds,
     flipGrid,
     floodPoints,
     gridToText,
@@ -16,7 +17,8 @@
     transformGrid,
     strokePoints
   } from "./ascii.js";
-  import { FONTS, loadFont, renderTextGrid } from "./textRender.js";
+  import { FONTS, TEXT_DEFAULTS, loadFont, renderText } from "./textRender.js";
+  import { loadSession, saveSession } from "./storage.js";
   import Icon from "./Icon.svelte";
 
   // Grouped so the palette can be scanned by intent rather than by codepoint.
@@ -125,8 +127,12 @@
     "#5ce65c"
   ];
 
-  let cols = $state(80);
-  let rows = $state(24);
+  // Whatever the last session left in localStorage, or null on a first visit.
+  const saved = loadSession();
+  const prefs = saved?.prefs ?? {};
+
+  let cols = $state(saved?.cols ?? 80);
+  let rows = $state(saved?.rows ?? 24);
   // What the Canvas panel's number fields hold. They only reach `cols`/`rows` on change, so
   // there is still an old size to compare against and to put on the undo stack.
   let colsInput = $state(80);
@@ -137,7 +143,7 @@
   });
 
   // Layer stack, bottom-first: index 0 paints first, later layers cover it.
-  let layers = $state([
+  const initialLayers = saved?.layers ?? [
     {
       id: 1,
       name: "Layer 1",
@@ -147,9 +153,11 @@
       oy: 0,
       grid: makeGrid(80, 24)
     }
-  ]);
-  let activeIndex = $state(0);
-  let nextLayerId = 2;
+  ];
+  let layers = $state(initialLayers);
+  let activeIndex = $state(saved?.activeIndex ?? 0);
+  // Ids only ever grow, so a restored stack carries on after its highest.
+  let nextLayerId = Math.max(0, ...initialLayers.map((l) => l.id)) + 1;
   let renamingId = $state(null);
 
   /**
@@ -193,6 +201,8 @@
     return out;
   }
 
+  const activeLayer = $derived(layers[activeIndex]);
+  const activeText = $derived(activeLayer.text ?? null);
   const layerOx = $derived(activeLayer.ox ?? 0);
   const layerOy = $derived(activeLayer.oy ?? 0);
 
@@ -257,10 +267,10 @@
     return { chars: flatten(null, owners), owners };
   });
 
-  const activeLayer = $derived(layers[activeIndex]);
-  const activeText = $derived(activeLayer.text ?? null);
-
   let fontVersion = $state(0); // bumped when a webfont finishes loading, to force a re-render
+  const loadedFamilies = new Set(); // webfonts confirmed usable by canvas
+  let fontFailures = $state({}); // family -> true once it's known to be unavailable (offline)
+  const fontReady = $derived(!activeText || !fontFailures[activeText.family]);
 
   const TRANSFORMS = [
     {
@@ -312,6 +322,10 @@
   const hasPendingTransform = $derived(
     !activeText && TRANSFORMS.some(({ key }) => pendingTransform[key])
   );
+  // Resampled once here; the on-screen preview, Apply and export all read this one result.
+  const transformedGrid = $derived(
+    hasPendingTransform ? transformGrid(grid, pendingTransform) : null
+  );
 
   // A different layer means a different pending transform; don't carry it across.
   $effect(() => {
@@ -324,19 +338,21 @@
     activeText ? (activeText[key] ?? 0) : pendingTransform[key];
 
   function setTransform(key, value) {
-    if (activeText) layers[activeIndex].text[key] = value;
+    if (activeText) editText(key, value);
     else pendingTransform[key] = value;
   }
 
   function resetTransform() {
-    if (activeText) Object.assign(layers[activeIndex].text, NO_TRANSFORM);
-    else pendingTransform = { ...NO_TRANSFORM };
+    if (activeText) {
+      snapshot();
+      Object.assign(layers[activeIndex].text, NO_TRANSFORM);
+    } else pendingTransform = { ...NO_TRANSFORM };
   }
 
   function applyTransform() {
     if (!hasPendingTransform) return;
     snapshot();
-    layers[activeIndex].grid = transformGrid(grid, pendingTransform);
+    layers[activeIndex].grid = transformedGrid;
     pendingTransform = { ...NO_TRANSFORM };
   }
 
@@ -374,8 +390,6 @@
     }
     layers[activeIndex].grid = flipGrid(grid, axis);
   }
-  let fontReady = $state(true); // false once a font is known to be unavailable (offline)
-
   function addTextLayer() {
     commitInProgress();
     snapshot();
@@ -386,38 +400,36 @@
       color: DEFAULT_INK,
       ox: 0,
       oy: 0,
-      grid: makeGrid(cols, rows),
+      grid: [],
       text: {
-        content: "HELLO",
-        family: "Anton",
-        bold: false,
-        // Small sizes blob together as counters close up; 7 cells reads cleanly in every font.
-        size: 7,
-        mode: "half",
-        threshold: 0.5,
-        letterSpacing: 0,
-        lineSpacing: 1.25,
-        x: 2,
-        y: 2
+        ...TEXT_DEFAULTS,
+        // Solid style draws with whatever the brush held when the layer was made; from then on
+        // it's the layer's own, so changing the brush can't restyle text behind your back.
+        solidChar: char.trim() ? char : "#"
       }
     };
-    layers = [
-      ...layers.slice(0, activeIndex + 1),
-      layer,
-      ...layers.slice(activeIndex + 1)
-    ];
-    activeIndex += 1;
-    selection = null;
+    insertLayer(layer);
   }
 
-  /** How far the active text layer spills past each canvas edge, if at all. */
+  /** The active text layer's rendered size, transforms included. */
+  const textSize = $derived(
+    activeText
+      ? { width: activeLayer.grid[0]?.length ?? 0, height: activeLayer.grid.length }
+      : null
+  );
+
+  /**
+   * How far the active text layer spills past each canvas edge, if at all. Measured on the
+   * finished cells, so a rotated or skewed layer is judged by where it actually lands.
+   */
   const textOverflow = $derived.by(() => {
-    if (!activeText || !activeLayer.textBox) return null;
-    const { width, height } = activeLayer.textBox;
-    const left = Math.max(0, -activeText.x);
-    const top = Math.max(0, -activeText.y);
-    const right = Math.max(0, activeText.x + width - cols);
-    const bottom = Math.max(0, activeText.y + height - rows);
+    if (!textSize) return null;
+    const { width, height } = textSize;
+    if (!width || !height) return null;
+    const left = Math.max(0, -layerOx);
+    const top = Math.max(0, -layerOy);
+    const right = Math.max(0, layerOx + width - cols);
+    const bottom = Math.max(0, layerOy + height - rows);
     return left || top || right || bottom ? { left, top, right, bottom } : null;
   });
 
@@ -428,13 +440,16 @@
     snapshot();
     const newCols = Math.min(400, cols + left + right);
     const newRows = Math.min(200, rows + top + bottom);
+    // The canvas has a ceiling; if it's hit, shift only by what was actually gained.
+    const dx = Math.min(left, newCols - cols);
+    const dy = Math.min(top, newRows - rows);
     for (const layer of layers) {
       if (layer.text) {
-        layer.text.x += left;
-        layer.text.y += top;
+        layer.text.x += dx;
+        layer.text.y += dy;
       } else {
-        layer.ox = (layer.ox ?? 0) + left;
-        layer.oy = (layer.oy ?? 0) + top;
+        layer.ox = (layer.ox ?? 0) + dx;
+        layer.oy = (layer.oy ?? 0) + dy;
       }
     }
     cols = newCols;
@@ -451,77 +466,137 @@
     flash("Text layer rasterized");
   }
 
+  const round2 = (n) => Math.round(n * 100) / 100;
+  // The slider reads as weight, so it's the inverse of the stored coverage threshold.
+  const textWeight = $derived(activeText ? round2(1 - activeText.threshold) : 0);
+
+  /** Change one parameter of the active text layer, as an undoable step. */
+  function editText(key, value) {
+    if (!activeText) return;
+    // A slider drag or a typing burst is one step, not one per event.
+    snapshot(`text:${activeLayer.id}:${key}`);
+    layers[activeIndex].text[key] = value;
+  }
+
   /**
-   * Re-render every text layer whenever its parameters (or a newly loaded font) change.
+   * Build a text layer's cells from its parameters: rasterise, mirror, then transform.
+   *
+   * The result is the layer's own tightly cropped grid with an origin, exactly like a painted
+   * layer that has been moved. Nothing is clipped to the canvas here, so a layer hanging off
+   * the edge keeps every cell, and flips and rotations work on the whole text rather than on
+   * whatever happened to be in view.
+   */
+  function buildTextLayer(text) {
+    const {
+      x,
+      y,
+      skewX = 0,
+      skewY = 0,
+      rotate = 0,
+      perspX = 0,
+      perspY = 0,
+      flipH,
+      flipV,
+      ...options
+    } = text;
+    let { grid: out, left, top } = renderText({ ...options, ramp: RAMPS.Blocks });
+    let ox = x + left;
+    let oy = y + top;
+    if (flipH) out = flipGrid(out, "h");
+    if (flipV) out = flipGrid(out, "v");
+    if (out.length && (skewX || skewY || rotate || perspX || perspY)) {
+      // The resampler keeps its grid's size, so give it a margin that any of the transforms
+      // can spill into, then crop back down to whatever came out.
+      const w = out[0].length;
+      const h = out.length;
+      const radius = Math.sqrt(w * w + 4 * h * h) / 2; // cells are 1:2, so height counts double
+      const turning = rotate % 90 !== 0;
+      const padX =
+        Math.ceil(
+          (turning ? radius - w / 2 : 0) +
+            (Math.abs(skewX) * h) / 2 +
+            (Math.abs(perspX) * w) / 2
+        ) + 2;
+      const padY =
+        Math.ceil(
+          (turning ? radius / 2 - h / 2 : 0) +
+            (Math.abs(skewY) * w) / 2 +
+            (Math.abs(perspY) * h) / 2
+        ) + 2;
+      const padded = makeGrid(w + padX * 2, h + padY * 2);
+      for (let r = 0; r < h; r++) {
+        for (let c = 0; c < w; c++) padded[r + padY][c + padX] = out[r][c];
+      }
+      const turned = transformGrid(padded, { skewX, skewY, rotate, perspX, perspY });
+      const bounds = contentBounds(turned);
+      if (!bounds) return { grid: [], ox, oy };
+      out = turned
+        .slice(bounds.minY, bounds.maxY + 1)
+        .map((row) => row.slice(bounds.minX, bounds.maxX + 1));
+      ox += bounds.minX - padX;
+      oy += bounds.minY - padY;
+    }
+    return { grid: out, ox, oy };
+  }
+
+  // What each text layer was last built from, by layer id. Rasterising goes through a canvas
+  // and back, so a layer is only rebuilt when its own parameters (or its font) change — not
+  // because a sibling was edited or the stack was reordered.
+  let textBuilds = new Map();
+
+  /**
+   * Re-render text layers whose parameters (or a newly loaded font) changed.
    * This reads only `text` and never `grid`, so writing the grid can't retrigger it.
    */
   $effect(() => {
     fontVersion;
-    cols;
-    rows;
+    const next = new Map();
     for (const layer of layers) {
       if (!layer.text) continue;
-      const {
-        x,
-        y,
-        skewX = 0,
-        skewY = 0,
-        rotate = 0,
-        perspX = 0,
-        perspY = 0,
-        flipH,
-        flipV,
-        ...options
-      } = $state.snapshot(layer.text);
-      const {
-        grid: rendered,
-        width,
-        height
-      } = renderTextGrid(
-        { ...options, ramp: RAMPS.Blocks, solidChar: char },
-        cols,
-        rows,
-        x,
-        y
-      );
-      // Transforms are parameters, re-applied on every render rather than baked once.
-      let out = rendered;
-      if (flipH) out = flipGrid(out, "h");
-      if (flipV) out = flipGrid(out, "v");
-      if (skewX || skewY || rotate || perspX || perspY) {
-        out = transformGrid(out, { skewX, skewY, rotate, perspX, perspY });
+      const text = $state.snapshot(layer.text);
+      const key = JSON.stringify(text) + (loadedFamilies.has(text.family) ? "+" : "-");
+      const previous = textBuilds.get(layer.id);
+      if (previous !== key) {
+        const { grid, ox, oy } = buildTextLayer(text);
+        layer.grid = grid;
+        layer.ox = ox;
+        layer.oy = oy;
       }
-      layer.grid = out;
-      layer.ox = 0;
-      layer.oy = 0;
-      layer.textBox = { width, height };
+      next.set(layer.id, key);
     }
+    textBuilds = next;
   });
 
-  /** Ask the browser for a webfont, then bump the version so text layers re-render with it. */
   function useFont(family) {
-    if (!activeText) return;
-    layers[activeIndex].text.family = family;
+    editText("family", family);
   }
 
   $effect(() => {
-    // Fetch whatever font the active text layer wants (including after undo swaps it back),
-    // then re-render once it's genuinely usable.
-    if (!activeText) return;
-    const family = activeText.family;
-    fontReady = document.fonts.check(`64px "${family}"`);
-    loadFont(family).then((ok) => {
-      fontReady = ok;
-      fontVersion += 1;
-    });
+    // Fetch whatever font any text layer wants — not just the active one, so a layer brought
+    // back by undo or a duplicate renders properly too — and bump the version once a font is
+    // genuinely usable so the layers using it are rebuilt.
+    for (const layer of layers) {
+      const family = layer.text?.family;
+      if (!family || loadedFamilies.has(family) || fontFailures[family]) continue;
+      loadFont(family).then((ok) => {
+        if (!ok) fontFailures[family] = true;
+        else if (!loadedFamilies.has(family)) {
+          loadedFamilies.add(family);
+          fontVersion += 1;
+        }
+      });
+    }
   });
 
   let tool = $state("pencil");
-  // Primary / secondary characters, à la Photoshop's foreground / background swatches.
-  let char = $state("#");
-  let altChar = $state(" ");
-  let activeSlot = $state("primary");
-  let boxStyle = $state("single");
+  // Primary / secondary characters, à la Photoshop's foreground / background swatches. The
+  // primary draws with the left button, the secondary with the right; X swaps them. Only the
+  // primary is editable directly: swap to reach the secondary.
+  let char = $state(prefs.char ?? "#");
+  let altChar = $state(prefs.altChar ?? " ");
+  let boxStyle = $state(
+    BOX_STYLES.includes(prefs.boxStyle) ? prefs.boxStyle : "single"
+  );
   let filled = $state(false);
   let sameCharOnly = $state(false); // magic wand: stop at a different character, not just at blanks
   let pressureSize = $state(true);
@@ -536,12 +611,13 @@
   let strokeMax = $state(null);
   let lastSample = null; // {x, y, t} — plain let: needed between events, never rendered
   let speedForceValue = 1;
-  let fontSize = $state(16);
+  let fontSize = $state(prefs.fontSize ?? 16);
   // Display-only cell metrics: extra px between columns, and the row height multiplier.
-  let letterSpacing = $state(0);
-  let lineHeight = $state(1.2);
-  let showGrid = $state(true);
-  let brushSize = $state(1);
+  let letterSpacing = $state(prefs.letterSpacing ?? 0);
+  let lineHeight = $state(prefs.lineHeight ?? 1.2);
+  let showGrid = $state(prefs.showGrid ?? true);
+  let showGuides = $state(prefs.showGuides ?? false); // row and column bands under the cursor
+  let brushSize = $state(prefs.brushSize ?? 1);
   // Which palette groups are expanded; the rest stay collapsed to keep the palette short.
   let openGroups = $state({ "Blocks & shades": true, "Box — single": true });
 
@@ -555,6 +631,7 @@
   // Selection state. `selection` is the set of selected cells; `moving` holds the lifted
   // characters while a move drag is in flight; `marquee` is the rubber-band box being dragged.
   let selection = $state(null); // [[x, y], ...]
+  let addingToSelection = false; // Shift was down when the select drag started
   let marquee = $state(null); // [x0, y0, x1, y1]
   let moving = $state(null); // { cells: [[x, y, ch]], dx, dy, copy }
   let layerShift = $state(null); // { dx, dy } while the Move tool drags a whole layer
@@ -583,7 +660,6 @@
   // The hover outline traces the brush footprint, so only sized tools widen it.
   const brushSpan = $derived(usesSize ? brushSize : 1);
   const brushOffset = $derived(Math.floor((brushSpan - 1) / 2));
-  const activeChar = $derived(activeSlot === "primary" ? char : altChar);
   const selKeys = $derived(
     new Set((selection ?? []).map(([x, y]) => `${x},${y}`))
   );
@@ -623,11 +699,9 @@
     }
   });
 
-  function setActiveChar(value) {
+  function setChar(value) {
     // Keep the last typed character so the single-cell input behaves like a replace.
-    const next = [...value].pop() ?? " ";
-    if (activeSlot === "primary") char = next;
-    else altChar = next;
+    char = [...value].pop() ?? " ";
   }
 
   function resetSpacing() {
@@ -696,9 +770,7 @@
     const isMoving = moving && (moving.dx || moving.dy);
     if (!isMoving && !preview.length && !hasPendingTransform) return null;
 
-    const out = hasPendingTransform
-      ? transformGrid(grid, pendingTransform)
-      : cloneGrid(grid);
+    const out = cloneGrid(transformedGrid ?? grid);
     // The cells arrive in canvas coordinates; the layer keeps its own.
     const put = (x, y, ch) => {
       const gy = y - layerOy;
@@ -762,38 +834,64 @@
     if (!hasPendingTransform) return composite;
     const owners = makeOwners();
     return {
-      chars: flatten(transformGrid(grid, pendingTransform), owners),
+      chars: flatten(transformedGrid, owners),
       owners
     };
   });
 
   const text = $derived(gridToText(exportView.chars));
 
+  /**
+   * A layer as plain, unshared data. The grid and the text parameters are both copied: a
+   * history entry that still pointed at the live `text` object would change along with it,
+   * and undoing an edit would restore the edit.
+   */
+  function cloneLayer(layer) {
+    const copy = { ...layer, grid: cloneGrid(layer.grid) };
+    if (layer.text) copy.text = structuredClone($state.snapshot(layer.text));
+    return copy;
+  }
+
   /** Undo entries capture the whole stack, so layer adds/deletes/reorders are undoable too. */
   function captureState() {
-    return {
-      layers: layers.map((l) => ({ ...l, grid: cloneGrid(l.grid) })),
-      activeIndex,
-      cols,
-      rows
-    };
+    return { layers: layers.map(cloneLayer), activeIndex, cols, rows };
   }
 
   function restoreState(state) {
     // Clone on the way out too: the stack entry must not become live, mutable state.
-    layers = state.layers.map((l) => ({ ...l, grid: cloneGrid(l.grid) }));
+    layers = state.layers.map(cloneLayer);
     activeIndex = Math.min(state.activeIndex, state.layers.length - 1);
     cols = state.cols;
     rows = state.rows;
   }
 
-  function snapshot() {
+  // The last coalescing snapshot, so a run of edits to one control folds into a single step.
+  let coalescing = null; // { key, at }
+  const COALESCE_MS = 1000;
+
+  /**
+   * Push the current state onto the undo stack. With a `coalesceKey`, repeated calls in quick
+   * succession — a slider being dragged, a word being typed — extend the previous entry
+   * instead of adding one apiece, so one Cmd+Z takes back the whole gesture.
+   */
+  function snapshot(coalesceKey = null) {
+    const now = Date.now();
+    if (
+      coalesceKey &&
+      coalescing?.key === coalesceKey &&
+      now - coalescing.at < COALESCE_MS
+    ) {
+      coalescing.at = now;
+      return;
+    }
+    coalescing = coalesceKey ? { key: coalesceKey, at: now } : null;
     undoStack = [...undoStack.slice(-99), captureState()];
     redoStack = [];
   }
 
   function undo() {
     if (!undoStack.length) return;
+    coalescing = null;
     const prev = undoStack[undoStack.length - 1];
     undoStack = undoStack.slice(0, -1);
     redoStack = [...redoStack, captureState()];
@@ -802,6 +900,7 @@
 
   function redo() {
     if (!redoStack.length) return;
+    coalescing = null;
     const next = redoStack[redoStack.length - 1];
     redoStack = redoStack.slice(0, -1);
     undoStack = [...undoStack, captureState()];
@@ -809,6 +908,8 @@
   }
 
   function paint(cells) {
+    // A text layer's cells are rebuilt from its parameters; anything painted would be lost.
+    if (activeText) return;
     ensureCanvasCovered();
     const layer = layers[activeIndex];
     const g = layer.grid;
@@ -909,6 +1010,83 @@
     paint(strokePoints(path, sizeFor(p)).map(([x, y]) => [x, y, ch]));
   }
 
+  // ── View transform ─────────────────────────────────────────────────────────
+  // Panning and zooming move the whole stage on screen and leave the artwork untouched —
+  // unlike the Canvas panel's zoom, which resizes the cells and so changes what is drawn.
+  const MIN_ZOOM = 0.1;
+  const MAX_ZOOM = 8;
+  let view = $state({ x: 0, y: 0, z: 1 });
+  let stageEl = $state(null);
+  let viewportEl = $state(null);
+  let spaceHeld = $state(false);
+  let panning = $state(null); // last pointer position while dragging the view, else null
+
+  /** Zoom by `factor`, keeping whatever sits under (clientX, clientY) pinned there. */
+  function zoomAt(clientX, clientY, factor) {
+    const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.z * factor));
+    if (z === view.z || !stageEl) return;
+    // The stage's own rect already carries the current pan and zoom, so the offset from its
+    // corner is the scaled distance to the cursor — no need to know the untransformed spot.
+    const rect = stageEl.getBoundingClientRect();
+    view = {
+      z,
+      x: view.x + (clientX - rect.left) * (1 - z / view.z),
+      y: view.y + (clientY - rect.top) * (1 - z / view.z)
+    };
+  }
+
+  const zoomCentre = (factor) =>
+    viewportEl
+      ? (() => {
+          const r = viewportEl.getBoundingClientRect();
+          zoomAt(r.left + r.width / 2, r.top + r.height / 2, factor);
+        })()
+      : undefined;
+
+  const resetView = () => (view = { x: 0, y: 0, z: 1 });
+
+  // Svelte registers wheel handlers as passive, where preventDefault is a no-op, so this
+  // one is attached by hand to stop the browser page-zooming on a pinch.
+  $effect(() => {
+    const el = viewportEl;
+    if (!el) return;
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
+
+  /** Trackpad and wheel: pinch (or ctrl/⌘ held) zooms, everything else pans. */
+  function onWheel(event) {
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY / 240));
+    } else {
+      view = { ...view, x: view.x - event.deltaX, y: view.y - event.deltaY };
+    }
+  }
+
+  // Middle-drag, or space held with the left button, pans regardless of the armed tool.
+  const wantsPan = (event) =>
+    event.button === 1 || (spaceHeld && event.button === 0);
+
+  function onViewPointerDown(event) {
+    if (!wantsPan(event)) return;
+    event.preventDefault();
+    panning = { x: event.clientX, y: event.clientY };
+    viewportEl?.setPointerCapture?.(event.pointerId);
+  }
+
+  function onViewPointerMove(event) {
+    if (!panning) return;
+    view = {
+      ...view,
+      x: view.x + event.clientX - panning.x,
+      y: view.y + event.clientY - panning.y
+    };
+    panning = { x: event.clientX, y: event.clientY };
+  }
+
+  const endPan = () => (panning = null);
+
   /**
    * The cell under a pointer event. Outside the canvas this returns null, except with
    * `clamp` — during a drag the pointer wandering off the edge should keep the stroke or
@@ -916,9 +1094,10 @@
    */
   function cellFromEvent(event, { clamp = false } = {}) {
     if (!gridEl) return null;
+    // The rect is post-transform, so the on-screen cell size is the zoomed one.
     const rect = gridEl.getBoundingClientRect();
-    const x = Math.floor((event.clientX - rect.left) / cellW);
-    const y = Math.floor((event.clientY - rect.top) / cellH);
+    const x = Math.floor((event.clientX - rect.left) / (cellW * view.z));
+    const y = Math.floor((event.clientY - rect.top) / (cellH * view.z));
     if (clamp) {
       return [
         Math.min(cols - 1, Math.max(0, x)),
@@ -930,6 +1109,7 @@
   }
 
   function onPointerDown(event) {
+    if (wantsPan(event)) return; // the viewport handles it as a pan instead
     const cell = cellFromEvent(event);
     if (!cell) return;
     if (isPath) {
@@ -945,27 +1125,31 @@
     start = cell;
     end = cell;
 
-    if (tool === "text") {
-      caret = cell;
-      gridEl?.focus();
-      return;
-    }
     if (tool === "move") {
       gridEl?.focus();
       layerShift = { dx: 0, dy: 0 };
       return;
     }
-    // A text layer is regenerated from its parameters, so painting on it would be erased.
+    // A text layer is regenerated from its parameters, so anything typed or painted onto it
+    // would be erased. Moving it is fine, which is why Move is handled above.
     if (activeText) {
       dragging = false;
       flash(
-        "Text layer — edit it with the Font tool, or Rasterize to draw on it"
+        "Text layer — edit it in the Font panel, or Rasterize to draw on it"
       );
+      return;
+    }
+    if (tool === "text") {
+      caret = cell;
+      gridEl?.focus();
       return;
     }
     if (tool === "select") {
       gridEl?.focus();
-      if (selKeys.has(`${cell[0]},${cell[1]}`)) {
+      // Shift joins the new marquee or wand pick onto the current selection instead of
+      // replacing it, and never starts a move even when the press lands inside it.
+      addingToSelection = event.shiftKey;
+      if (!addingToSelection && selKeys.has(`${cell[0]},${cell[1]}`)) {
         // Grab the current selection's characters; Alt drags out a copy instead of moving.
         moving = {
           cells: selection.map(([x, y]) => [x, y, cellAt(x, y)]),
@@ -975,7 +1159,7 @@
         };
       } else {
         marquee = [cell[0], cell[1], cell[0], cell[1]];
-        selection = null;
+        if (!addingToSelection) selection = null;
       }
       return;
     }
@@ -1065,6 +1249,7 @@
   }
 
   function onPointerUp() {
+    endPan();
     // Also fires from the window, so a release outside the canvas — or outside the browser —
     // still ends the drag. Without the guard the second delivery would re-commit the stroke.
     if (!dragging) return;
@@ -1119,15 +1304,16 @@
     if (!marquee) return;
     const [x0, y0, x1, y1] = marquee;
     marquee = null;
-    if (x0 === x1 && y0 === y1) {
-      // A click with no drag acts as a magic wand; on blank canvas it just clears.
-      const object = objectPoints(activeCanvasGrid(), x0, y0, {
-        sameChar: sameCharOnly
-      });
-      selection = object.length ? object : null;
+    const cells =
+      x0 === x1 && y0 === y1
+        ? // A click with no drag acts as a magic wand; on blank canvas it just clears.
+          objectPoints(activeCanvasGrid(), x0, y0, { sameChar: sameCharOnly })
+        : rectPoints(x0, y0, x1, y1, true);
+    if (addingToSelection && selection) {
+      const fresh = cells.filter(([x, y]) => !selKeys.has(`${x},${y}`));
+      selection = [...selection, ...fresh];
       return;
     }
-    const cells = rectPoints(x0, y0, x1, y1, true);
     selection = cells.length ? cells : null;
   }
 
@@ -1162,6 +1348,13 @@
     snapshot();
     paint(selection.map(([x, y]) => [x, y, EMPTY]));
   }
+
+  const ARROWS = {
+    ArrowLeft: [-1, 0],
+    ArrowRight: [1, 0],
+    ArrowUp: [0, -1],
+    ArrowDown: [0, 1]
+  };
 
   function onKeyDown(event) {
     // Bound to the window so shortcuts work after clicking a panel control, but form
@@ -1205,16 +1398,24 @@
       selection = null;
       return;
     }
+    if (meta && ["=", "+", "-", "_", "0"].includes(event.key)) {
+      event.preventDefault();
+      if (event.key === "0") resetView();
+      else zoomCentre(event.key === "-" || event.key === "_" ? 1 / 1.25 : 1.25);
+      return;
+    }
     if (meta) return;
+
+    // Space arms panning, except while typing, where it is a character like any other.
+    if (event.code === "Space" && !(tool === "text" && caret)) {
+      event.preventDefault();
+      spaceHeld = true;
+      return;
+    }
 
     if (tool === "move" && event.key.startsWith("Arrow")) {
       event.preventDefault();
-      const d = {
-        ArrowLeft: [-1, 0],
-        ArrowRight: [1, 0],
-        ArrowUp: [0, -1],
-        ArrowDown: [0, 1]
-      }[event.key];
+      const d = ARROWS[event.key];
       nudgeLayer(d[0], d[1]);
       return;
     }
@@ -1245,18 +1446,14 @@
       }
       if (event.key.startsWith("Arrow")) {
         event.preventDefault();
-        const d = {
-          ArrowLeft: [-1, 0],
-          ArrowRight: [1, 0],
-          ArrowUp: [0, -1],
-          ArrowDown: [0, 1]
-        }[event.key];
+        const d = ARROWS[event.key];
         nudge(d[0], d[1]);
         return;
       }
     }
 
-    if (tool === "text" && caret) {
+    // The caret may be left over from a painted layer; typing must not land on a text layer.
+    if (tool === "text" && caret && !activeText) {
       const [x, y] = caret;
       if (event.key === "Backspace") {
         event.preventDefault();
@@ -1273,12 +1470,7 @@
       }
       if (event.key.startsWith("Arrow")) {
         event.preventDefault();
-        const d = {
-          ArrowLeft: [-1, 0],
-          ArrowRight: [1, 0],
-          ArrowUp: [0, -1],
-          ArrowDown: [0, 1]
-        }[event.key];
+        const d = ARROWS[event.key];
         caret = [
           Math.min(cols - 1, Math.max(0, x + d[0])),
           Math.min(rows - 1, Math.max(0, y + d[1]))
@@ -1328,18 +1520,26 @@
     if (shortcut) tool = shortcut;
   }
 
-  function addLayer() {
-    commitInProgress();
-    snapshot();
-    const layer = {
-      id: nextLayerId++,
-      name: `Layer ${nextLayerId - 1}`,
+  /** A blank painted layer the size of the canvas, named after its id. */
+  function newLayer() {
+    const id = nextLayerId++;
+    return {
+      id,
+      name: `Layer ${id}`,
       visible: true,
       color: DEFAULT_INK,
       ox: 0,
       oy: 0,
       grid: makeGrid(cols, rows)
     };
+  }
+
+  /**
+   * Drop a layer into the stack just above the active one and make it active. Not an undo
+   * step on its own: callers snapshot first, so a gesture that also adds a layer — paste onto
+   * a text layer, say — is still one step.
+   */
+  function insertLayer(layer) {
     layers = [
       ...layers.slice(0, activeIndex + 1),
       layer,
@@ -1349,26 +1549,20 @@
     selection = null;
   }
 
+  function addLayer() {
+    commitInProgress();
+    snapshot();
+    insertLayer(newLayer());
+  }
+
   function duplicateLayer() {
     commitInProgress();
     snapshot();
-    const source = layers[activeIndex];
-    const copy = {
-      id: nextLayerId++,
-      name: `${source.name} copy`,
-      visible: source.visible,
-      color: source.color,
-      ox: source.ox ?? 0,
-      oy: source.oy ?? 0,
-      grid: cloneGrid(source.grid)
-    };
-    layers = [
-      ...layers.slice(0, activeIndex + 1),
-      copy,
-      ...layers.slice(activeIndex + 1)
-    ];
-    activeIndex += 1;
-    selection = null;
+    // cloneLayer copies the text parameters too, so a copy of a text layer stays editable text.
+    const copy = cloneLayer(layers[activeIndex]);
+    copy.id = nextLayerId++;
+    copy.name = `${copy.name} copy`;
+    insertLayer(copy);
   }
 
   function deleteLayer() {
@@ -1399,6 +1593,9 @@
     snapshot();
     const upper = layers[activeIndex];
     const lower = layers[activeIndex - 1];
+    // Merging onto a text layer bakes it first: otherwise its next rebuild would regenerate
+    // its cells from the parameters and quietly drop everything just merged in.
+    if (lower.text) delete lower.text;
     // The two layers can sit at different origins and be different sizes, so grow the lower
     // one to hold both before stamping — merging must not crop either of them.
     const ux = upper.ox ?? 0;
@@ -1486,9 +1683,11 @@
       Math.max(...xs) - minX + 1,
       Math.max(...ys) - minY + 1
     );
+    // Read through the export view, so a selection copies what's on screen — pending
+    // transform included — exactly as copying the whole canvas does.
+    const { chars } = exportView;
     for (const [x, y] of selection) {
-      if (y < composite.chars.length && x < cols)
-        out[y - minY][x - minX] = composite.chars[y][x];
+      if (y < chars.length && x < cols) out[y - minY][x - minX] = chars[y][x];
     }
     return gridToText(out);
   });
@@ -1499,16 +1698,18 @@
     try {
       await navigator.clipboard.writeText(content);
       flash(`Copied ${what} to clipboard`);
+      return true;
     } catch {
-      flash("Clipboard blocked — try ⌘C, or Export instead");
+      flash("Clipboard blocked — use Export to save the text instead");
+      return false;
     }
   }
 
   /** Copy the selection, then clear the cells it covers on the active layer. */
   async function cutSelection() {
     if (!selection?.length) return;
-    await copyText();
-    deleteSelection();
+    // Nothing is removed unless the copy actually reached the clipboard.
+    if (await copyText()) deleteSelection();
   }
 
   function saveBlob(blob, filename) {
@@ -1587,10 +1788,6 @@
       return;
     }
 
-    // A text layer regenerates from its parameters, so give the paste a layer of its own.
-    if (activeText) addLayer();
-    commitPendingTransform();
-
     const [originX, originY] = selection?.length
       ? [
           Math.min(...selection.map(([x]) => x)),
@@ -1614,7 +1811,10 @@
       return;
     }
 
+    commitInProgress();
     snapshot();
+    // A text layer regenerates from its parameters, so give the paste a layer of its own.
+    if (activeText) insertLayer(newLayer());
     paint(cells);
     tool = "select";
     selection = cells.map(([x, y]) => [x, y]);
@@ -1650,7 +1850,7 @@
   }
 
   // ── Chrome ─────────────────────────────────────────────────────────────────
-  // Three toolbar groups, matching the Figma file: selection, drawing, and the two
+  // Three toolbar groups, matching the Figma file: selection, drawing, and the three
   // buttons that open a panel rather than arm a tool.
   const SELECT_TOOLS = [
     {
@@ -1733,24 +1933,57 @@
     if (inShapeGroup) lastShape = tool;
   });
 
+  // Panels that can be torn out of the popover and docked on the right. The tool settings
+  // aren't here: they belong to whatever is armed, so they have nowhere fixed to live.
+  const PINNABLE = {
+    tool: "Tool",
+    layers: "Layers",
+    char: "Characters",
+    effects: "Effects",
+    canvas: "Canvas"
+  };
+
+  // Panel names, in dock order top to bottom. Layers starts docked, where it always lived;
+  // its toolbar button hides it and Unpin moves it into the popover like any other panel.
+  // A restored session keeps whatever arrangement it was left in.
+  let pinned = $state(
+    (prefs.pinned ?? ["layers"]).filter((name) => name in PINNABLE)
+  );
+
   /** What the floating panel above the toolbar shows. 'tool' follows the armed tool. */
   let panel = $state("tool");
   const hasToolSettings = $derived(tool !== "move" && tool !== "fill");
-  const panelOpen = $derived(panel !== "tool" || hasToolSettings);
+  // Hidden is a one-shot dismissal of the popover: it survives until the user asks for a
+  // panel again, so a panel that covers the artwork can be pushed out of the way in place.
+  let panelHidden = $state(false);
+  const panelOpen = $derived(
+    panelHidden || pinned.includes(panel)
+      ? false
+      : panel !== "tool" || hasToolSettings
+  );
+  // A panel button has two lit states: solid while its panel is up in the popover, the way
+  // an armed tool is, and a quieter outline while the panel lives in the dock.
+  const panelPopped = (name) =>
+    panel === name && !panelHidden && !pinned.includes(name);
 
   function pickTool(id) {
     tool = id === "shape" ? lastShape : id;
     panel = "tool";
+    panelHidden = false;
   }
 
-  // Panels that can be torn out of the popover and docked under Layers. The tool settings
-  // aren't here: they belong to whatever is armed, so they have nowhere fixed to live.
-  const PINNABLE = { char: "Characters", effects: "Effects", canvas: "Canvas" };
-  let pinned = $state([]); // panel names, in dock order under Layers
-
+  // Docked, the tool panel is named after whatever is armed rather than "Tool".
+  const toolTitle = $derived(
+    inShapeGroup
+      ? shapeButton.label
+      : ([...SELECT_TOOLS, ...DRAW_TOOLS].find((t) => t.id === tool)?.label ??
+        tool)
+  );
+  const panelTitle = (name) => (name === "tool" ? toolTitle : PINNABLE[name]);
   function pinPanel(name) {
     if (!pinned.includes(name)) pinned = [...pinned, name];
     panel = "tool";
+    panelHidden = false;
   }
 
   const unpinPanel = (name) => (pinned = pinned.filter((n) => n !== name));
@@ -1761,32 +1994,32 @@
    */
   function togglePanel(name) {
     if (pinned.includes(name)) unpinPanel(name);
-    else panel = panel === name ? "tool" : name;
+    else if (panel === name && !panelHidden) panel = "tool";
+    else {
+      panel = name;
+      panelHidden = false;
+    }
   }
 
-  /** Clicking a character swatch arms that slot and shows the palette on it. */
-  function pickSlot(slot) {
-    const same = activeSlot === slot;
-    activeSlot = slot;
-    if (same) togglePanel("char");
-    else if (!pinned.includes("char")) panel = "char";
+  /** Clicking the primary swatch toggles the character palette. */
+  function pickChar() {
+    togglePanel("char");
   }
 
   /** Swatches show a visible stand-in for whitespace rather than an empty box. */
   const showChar = (ch) => (ch === " " ? "SP" : ch);
 
-  // ── Layers panel ───────────────────────────────────────────────────────────
-  const LAYERS_PANEL_WIDTH = 265;
-  const LAYER_ROW_HEIGHT = 32;
+  // ── Dock ───────────────────────────────────────────────────────────────────
+  const DOCK_WIDTH = 265;
 
-  let collapsed = $state({ layers: false }); // panel name -> collapsed, across the dock
+  let collapsed = $state({}); // panel name -> collapsed, across the dock
   let panelPos = $state(null); // {x, y}; null until it's parked in its designed spot
   let listEl = $state(null);
   let panelDrag = null;
 
   $effect(() => {
     if (!panelPos)
-      panelPos = { x: window.innerWidth - LAYERS_PANEL_WIDTH - 23, y: 26 };
+      panelPos = { x: window.innerWidth - DOCK_WIDTH - 23, y: 26 };
   });
 
   /** Keep a dragged panel on screen when the window shrinks under it. */
@@ -1795,7 +2028,7 @@
     panelPos = {
       x: Math.max(
         8,
-        Math.min(window.innerWidth - LAYERS_PANEL_WIDTH - 8, panelPos.x)
+        Math.min(window.innerWidth - DOCK_WIDTH - 8, panelPos.x)
       ),
       y: Math.max(8, Math.min(window.innerHeight - 60, panelPos.y))
     };
@@ -1821,8 +2054,8 @@
 
   const endPanelDrag = () => (panelDrag = null);
 
-  // The dock — Layers plus whatever is pinned under it — moves as one column, so every
-  // header in it drags the same position.
+  // The dock — every pinned panel — moves as one column, so every header in it drags the
+  // same position.
   const dockDrag = {
     onpointerdown: startPanelDrag,
     onpointermove: movePanelDrag,
@@ -1843,7 +2076,9 @@
   function moveRowDrag(event) {
     if (!rowDrag || !listEl) return;
     const top = listEl.getBoundingClientRect().top;
-    const visual = Math.floor((event.clientY - top) / LAYER_ROW_HEIGHT);
+    // Measured from a real row, so the stylesheet is the only place the height is set.
+    const rowHeight = listEl.firstElementChild?.offsetHeight || 32;
+    const visual = Math.floor((event.clientY - top + listEl.scrollTop) / rowHeight);
     const clamped = Math.max(0, Math.min(layers.length - 1, visual));
     rowDrag = { ...rowDrag, to: layers.length - 1 - clamped };
   }
@@ -1902,31 +2137,177 @@
     menu = null;
     colorMenu = null;
   };
+
+  // ── Persistence ────────────────────────────────────────────────────────────
+  // The document and display preferences go to localStorage so a reload picks up where the
+  // last session left off. Saving is debounced: a brush stroke changes hundreds of cells, and
+  // serialising the stack after every one would stall the stroke. The undo history isn't kept.
+  const SAVE_DELAY_MS = 500;
+  let saveTimer = null;
+  let pendingSave = null;
+  let storageWarned = false;
+
+  function flushSave() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    if (!pendingSave) return;
+    const ok = saveSession(pendingSave);
+    pendingSave = null;
+    if (!ok && !storageWarned) {
+      storageWarned = true;
+      flash("Couldn't save the session — browser storage is full or blocked");
+    }
+  }
+
+  $effect(() => {
+    // Snapshotting reads every cell, which is exactly what makes this rerun on any edit.
+    pendingSave = {
+      cols,
+      rows,
+      activeIndex,
+      layers: $state.snapshot(layers),
+      prefs: {
+        fontSize,
+        letterSpacing,
+        lineHeight,
+        showGrid,
+        showGuides,
+        char,
+        altChar,
+        brushSize,
+        boxStyle,
+        pinned: $state.snapshot(pinned)
+      }
+    };
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, SAVE_DELAY_MS);
+  });
 </script>
 
 <svelte:window
   onkeydown={onKeyDown}
+  onkeyup={(e) => {
+    if (e.code === "Space") spaceHeld = false;
+  }}
+  onblur={() => (spaceHeld = false)}
   onpaste={onPaste}
   onpointerup={onPointerUp}
   onpointercancel={onPointerUp}
   onresize={clampPanel}
+  onbeforeunload={flushSave}
   onclick={closeMenus}
 />
+
+{#snippet layersPanel()}
+  <div class="layers-body">
+    <div class="layer-list" bind:this={listEl}>
+      {#each [...layers].reverse() as layer, i (layer.id)}
+        {@const index = layers.length - 1 - i}
+        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+        <div
+          class="layer-row"
+          class:active={index === activeIndex}
+          class:dragging={rowDrag?.from === index}
+          class:drop={rowDrag &&
+            rowDrag.from !== index &&
+            rowDrag.to === index}
+          onclick={() => selectLayer(index)}
+          oncontextmenu={(e) => openMenu(e, index)}
+        >
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span
+            class="grip drag"
+            title="Drag to reorder"
+            onpointerdown={(e) => startRowDrag(e, index)}
+            onpointermove={moveRowDrag}
+            onpointerup={endRowDrag}>⠿</span
+          >
+          <button
+            class="layer-chip"
+            class:text={!!layer.text}
+            style="--chip:{layer.color}"
+            title="Layer colour"
+            onclick={(e) => openColorMenu(e, index)}
+            aria-label="Layer colour"
+          ></button>
+          {#if renamingId === layer.id}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="layer-name-input"
+              value={layer.name}
+              autofocus
+              onblur={(e) => {
+                layer.name = e.currentTarget.value.trim() || layer.name;
+                renamingId = null;
+              }}
+              onkeydown={(e) => {
+                if (e.key === "Enter" || e.key === "Escape")
+                  e.currentTarget.blur();
+                e.stopPropagation();
+              }}
+            />
+          {:else}
+            <span
+              class="layer-name"
+              ondblclick={() => (renamingId = layer.id)}
+              title="Click to select, double-click to rename, right-click for more"
+              >{layer.name}</span
+            >
+          {/if}
+          <button
+            class="eye"
+            title={layer.visible ? "Hide layer" : "Show layer"}
+            onclick={(e) => {
+              e.stopPropagation();
+              toggleVisible(index);
+            }}
+          >
+            <Icon
+              name={layer.visible ? "eye-open" : "eye-close"}
+              size={18}
+            />
+          </button>
+        </div>
+      {/each}
+    </div>
+
+    <div class="layer-actions">
+      <button title="New layer" onclick={addLayer}
+        ><Icon name="plus" size={24} /></button
+      >
+      <button title="Duplicate layer" onclick={duplicateLayer}
+        ><Icon name="clone" size={24} /></button
+      >
+      <button
+        title="Join with the layer below"
+        disabled={activeIndex === 0}
+        onclick={mergeDown}
+      >
+        <Icon name="join" size={24} />
+      </button>
+      <button
+        title="Delete layer"
+        disabled={layers.length === 1}
+        onclick={deleteLayer}
+      >
+        <Icon name="trash" size={24} />
+      </button>
+    </div>
+  </div>
+{/snippet}
 
 {#snippet charPanel()}
   <div class="settings-body">
     <div class="field">
-      <span class="label"
-        >{activeSlot === "primary" ? "Primary" : "Secondary"}</span
-      >
+      <span class="label">Character</span>
       <input
         class="char-input"
-        value={activeChar}
-        oninput={(e) => setActiveChar(e.currentTarget.value)}
+        value={char}
+        oninput={(e) => setChar(e.currentTarget.value)}
         spellcheck="false"
       />
       <span class="value"
-        >U+{activeChar
+        >U+{char
           .codePointAt(0)
           .toString(16)
           .toUpperCase()
@@ -1944,8 +2325,8 @@
             {#each group.chars as p}
               <button
                 class="swatch-btn"
-                class:active={activeChar === p}
-                onclick={() => setActiveChar(p)}
+                class:active={char === p}
+                onclick={() => setChar(p)}
                 title={p === " " ? "space" : p}>{p === " " ? "␠" : p}</button
               >
             {/each}
@@ -2017,8 +2398,11 @@
         onchange={applySize}
       />
     </div>
-    <label class="field" title="Font size in pixels (− and + to step)">
-      <span class="label">Zoom</span>
+    <label
+      class="field"
+      title="Glyph size in pixels — part of the artwork, unlike the view zoom (− and + to step)"
+    >
+      <span class="label">Type size</span>
       <input type="range" min="8" max="56" bind:value={fontSize} />
       <span class="value">{fontSize}px</span>
     </label>
@@ -2048,6 +2432,12 @@
       <label class="check" title="Toggle cell guides (G)">
         <input type="checkbox" bind:checked={showGrid} /> Show grid
       </label>
+      <label
+        class="check"
+        title="Highlight the row and column under the cursor across the canvas"
+      >
+        <input type="checkbox" bind:checked={showGuides} /> Cursor guides
+      </label>
       <button class="ghost value" onclick={resetSpacing}>Reset spacing</button>
     </div>
     <div class="field">
@@ -2076,9 +2466,299 @@
   </div>
 {/snippet}
 
+{#snippet toolPanel()}
+  <div class="settings-body">
+    {#if !hasToolSettings}
+      <p class="note">Nothing to configure for this tool.</p>
+    {:else if tool === "select"}
+      <label
+        class="check"
+        title="Click-to-select stops at a different character instead of at blanks"
+      >
+        <input type="checkbox" bind:checked={sameCharOnly} /> Same character
+        only
+      </label>
+    {:else if tool === "text"}
+      {#if activeText}
+        <textarea
+          class="text-input"
+          rows="2"
+          value={activeText.content}
+          oninput={(e) => editText("content", e.currentTarget.value)}
+          placeholder="Type here"
+        ></textarea>
+        <div class="field">
+          <span class="label">Font</span>
+          <select
+            value={activeText.family}
+            onchange={(e) => useFont(e.currentTarget.value)}
+          >
+            {#each FONTS as f}<option value={f.family}
+                >{f.family} · {f.note}</option
+              >{/each}
+          </select>
+          <label class="check"
+            ><input
+              type="checkbox"
+              checked={activeText.bold}
+              onchange={(e) => editText("bold", e.currentTarget.checked)}
+            /> Bold</label
+          >
+        </div>
+        <label class="field" title="Height of a capital letter, in rows of cells">
+          <span class="label">Size</span>
+          <input
+            type="range"
+            min="1"
+            max="20"
+            step="0.5"
+            value={activeText.size}
+            oninput={(e) => editText("size", +e.currentTarget.value)}
+          />
+          <span class="value">{activeText.size}</span>
+        </label>
+        <div class="field">
+          <span class="label">Align</span>
+          <div class="segmented">
+            {#each ["left", "center", "right"] as a}
+              <button
+                class:active={(activeText.align ?? "left") === a}
+                onclick={() => editText("align", a)}>{a}</button
+              >
+            {/each}
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Style</span>
+          <select
+            value={activeText.mode}
+            onchange={(e) => editText("mode", e.currentTarget.value)}
+          >
+            <option value="quad">Quadrants</option>
+            <option value="half">Half blocks</option>
+            <option value="shade">Shading</option>
+            <option value="solid">Solid</option>
+          </select>
+          {#if activeText.mode === "solid"}
+            <input
+              class="glyph"
+              type="text"
+              maxlength="2"
+              title="Character to draw with"
+              value={activeText.solidChar ?? "#"}
+              oninput={(e) => {
+                const ch = [...e.currentTarget.value].pop();
+                if (ch && ch.trim()) editText("solidChar", ch);
+              }}
+            />
+          {:else}
+            <span class="value">
+              {textSize?.width
+                ? `${textSize.width}×${textSize.height}`
+                : "—"}
+            </span>
+          {/if}
+        </div>
+        <label
+          class="field"
+          title="How readily a cell is inked — right is bolder"
+        >
+          <span class="label">Weight</span>
+          <!-- Stored as the coverage threshold, which runs the other way: heavier = lower. -->
+          <input
+            type="range"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            value={textWeight}
+            oninput={(e) =>
+              editText("threshold", round2(1 - +e.currentTarget.value))}
+          />
+          <span class="value">{textWeight}</span>
+        </label>
+        <label class="field" title="Extra space between glyphs, in cells">
+          <span class="label">Tracking</span>
+          <input
+            type="range"
+            min="-1"
+            max="4"
+            step="0.25"
+            value={activeText.letterSpacing}
+            oninput={(e) =>
+              editText("letterSpacing", +e.currentTarget.value)}
+          />
+          <span class="value">{activeText.letterSpacing}</span>
+        </label>
+        <label
+          class="field"
+          title="Line height as a multiple of the font size"
+        >
+          <span class="label">Leading</span>
+          <input
+            type="range"
+            min="0.8"
+            max="2.5"
+            step="0.05"
+            value={activeText.lineSpacing}
+            oninput={(e) => editText("lineSpacing", +e.currentTarget.value)}
+          />
+          <span class="value">{activeText.lineSpacing}</span>
+        </label>
+        <div class="field" title="Column and row of the first line's cap line">
+          <span class="label">Position</span>
+          <input
+            type="number"
+            value={activeText.x}
+            title="Column"
+            oninput={(e) => {
+              const v = e.currentTarget.valueAsNumber;
+              if (Number.isFinite(v)) editText("x", Math.round(v));
+            }}
+          />
+          <input
+            type="number"
+            value={activeText.y}
+            title="Row"
+            oninput={(e) => {
+              const v = e.currentTarget.valueAsNumber;
+              if (Number.isFinite(v)) editText("y", Math.round(v));
+            }}
+          />
+        </div>
+        {#if !fontReady}
+          <p class="note">
+            Font unavailable offline — drawing with a system fallback.
+          </p>
+        {/if}
+        {#if textOverflow}
+          <p class="note warn">
+            Extends past the canvas — the text is kept in full, only the
+            view is cropped.
+          </p>
+          <button class="wide" onclick={fitCanvasToText}
+            >Fit canvas to text</button
+          >
+        {/if}
+        <button class="wide" onclick={rasterizeLayer}
+          >Rasterize to draw on it</button
+        >
+      {:else}
+        <p class="note">
+          Click the canvas and type to set characters directly.
+        </p>
+        <button class="wide" onclick={addTextLayer}>New text layer</button
+        >
+      {/if}
+    {:else if inShapeGroup}
+      <div class="field">
+        <span class="label">Shape</span>
+        <div class="segmented">
+          {#each SHAPES as s}
+            <button
+              class:active={tool === s.id}
+              onclick={() => pickTool(s.id)}
+            >
+              {s.label} <em>{s.key}</em>
+            </button>
+          {/each}
+        </div>
+      </div>
+      {#if tool === "path" || tool === "box"}
+        <div class="field">
+          <span class="label">Style</span>
+          <select bind:value={boxStyle}>
+            {#each BOX_STYLES as s}<option value={s}>{s}</option>{/each}
+          </select>
+        </div>
+      {/if}
+      {#if tool === "rect"}
+        <label class="check"
+          ><input type="checkbox" bind:checked={filled} /> Filled</label
+        >
+      {/if}
+      {#if tool === "line"}
+        <label class="field" title="Brush size ([ and ])">
+          <span class="label">Size</span>
+          <input type="range" min="1" max="9" bind:value={brushSize} />
+          <span class="value">{brushSize}×{brushSize}</span>
+        </label>
+      {/if}
+      {#if tool === "path"}
+        <p class="note">
+          Click each corner. Enter, Esc, double-click or right-click
+          releases the line so you can start the next one.
+        </p>
+      {/if}
+    {:else}
+      <label class="field" title="Brush size ([ and ])">
+        <span class="label"
+          >{tool === "brush" && pressureSize ? "Max size" : "Size"}</span
+        >
+        <input type="range" min="1" max="9" bind:value={brushSize} />
+        <span class="value">{brushSize}×{brushSize}</span>
+      </label>
+      {#if tool === "brush"}
+        <div class="field" title="What varies the brush as you draw">
+          <span class="label">Dynamics</span>
+          <div class="segmented">
+            <button
+              class:active={dynamics === "pressure"}
+              onclick={() => (dynamics = "pressure")}>Pressure</button
+            >
+            <button
+              class:active={dynamics === "speed"}
+              onclick={() => (dynamics = "speed")}>Speed</button
+            >
+            <button
+              class:active={dynamics === "off"}
+              onclick={() => (dynamics = "off")}>Off</button
+            >
+          </div>
+        </div>
+        <div class="field">
+          <label class="check" title="Harder press paints a wider dab">
+            <input type="checkbox" bind:checked={pressureSize} /> Force → size
+          </label>
+          <label
+            class="check"
+            title="Harder press picks a denser character"
+          >
+            <input type="checkbox" bind:checked={pressureDensity} /> Force
+            → density
+          </label>
+        </div>
+        {#if pressureDensity}
+          <div class="field">
+            <span class="label">Ramp</span>
+            <select bind:value={rampName}>
+              {#each Object.keys(RAMPS) as r}<option value={r}>{r}</option
+                >{/each}
+            </select>
+          </div>
+        {/if}
+        <p class="note pre">{dynamicsNote}</p>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
 <div class="app">
-  <div class="viewport">
-    <div class="stage">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="viewport"
+    class:panning
+    class:pannable={spaceHeld}
+    bind:this={viewportEl}
+    onpointerdown={onViewPointerDown}
+    onpointermove={onViewPointerMove}
+    onpointerup={endPan}
+    onpointercancel={endPan}
+  >
+    <div
+      class="stage"
+      bind:this={stageEl}
+      style="transform: translate({view.x}px, {view.y}px) scale({view.z});"
+    >
       <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <pre
         bind:this={gridEl}
@@ -2102,6 +2782,12 @@
               >{/each}</div>{/each}{#if showGrid}<span
             class="gridlines"
             style="background-size:{cellW}px {cellH}px;"
+          ></span>{/if}{#if hover && showGuides}<span
+            class="guide row"
+            style="top:{hover[1] * cellH}px; height:{cellH}px;"
+          ></span><span
+            class="guide col"
+            style="left:{hover[0] * cellW}px; width:{cellW}px;"
           ></span>{/if}{#if hover}<span
             class="hover-cell"
             style="left:{(hover[0] - brushOffset) * cellW}px; top:{(hover[1] -
@@ -2125,154 +2811,54 @@
             class="caret"
             style="left:{caret[0] * cellW}px; top:{caret[1] *
               cellH}px; width:{cellW}px; height:{cellH}px;"></span>{/if}</pre>
-      <div class="measure-box" aria-hidden="true">
-        <span
-          bind:this={measureEl}
-          class="measure"
-          style="font-size:{fontSize}px; letter-spacing:{letterSpacing}px;"
-          >00000000000000000000000000000000000000000000000000</span
-        >
-      </div>
+    </div>
+    <!-- Outside the stage: a zoomed rect would report a scaled pitch. -->
+    <div class="measure-box" aria-hidden="true">
+      <span
+        bind:this={measureEl}
+        class="measure"
+        style="font-size:{fontSize}px; letter-spacing:{letterSpacing}px;"
+        >00000000000000000000000000000000000000000000000000</span
+      >
     </div>
   </div>
 
-  <div
-    class="dock"
-    style="left:{panelPos?.x ?? 0}px; top:{panelPos?.y ?? 26}px"
-  >
-    <div class="panel layers">
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="panel-head" {...dockDrag}>
-        <button
-          class="chevron"
-          class:collapsed={collapsed.layers}
-          title={collapsed.layers ? "Expand" : "Collapse"}
-          onclick={() => (collapsed.layers = !collapsed.layers)}
-        >
-          <Icon name="chevron" size={24} />
-        </button>
-        <span class="panel-title">Layers</span>
-        <span class="grip" aria-hidden="true">⠿</span>
-      </div>
-
-      {#if !collapsed.layers}
-        <div class="layer-list" bind:this={listEl}>
-          {#each [...layers].reverse() as layer, i (layer.id)}
-            {@const index = layers.length - 1 - i}
-            <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-            <div
-              class="layer-row"
-              class:active={index === activeIndex}
-              class:dragging={rowDrag?.from === index}
-              class:drop={rowDrag &&
-                rowDrag.from !== index &&
-                rowDrag.to === index}
-              onclick={() => selectLayer(index)}
-              oncontextmenu={(e) => openMenu(e, index)}
+  {#if pinned.length}
+    <div
+      class="dock"
+      style="left:{panelPos?.x ?? 0}px; top:{panelPos?.y ?? 26}px"
+    >
+      <!-- Panels pinned out of the popover stack in the dock and travel with it. -->
+      {#each pinned as name (name)}
+        <div class="panel">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="panel-head" {...dockDrag}>
+            <button
+              class="chevron"
+              class:collapsed={collapsed[name]}
+              title={collapsed[name] ? "Expand" : "Collapse"}
+              onclick={() => (collapsed[name] = !collapsed[name])}
             >
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <span
-                class="grip drag"
-                title="Drag to reorder"
-                onpointerdown={(e) => startRowDrag(e, index)}
-                onpointermove={moveRowDrag}
-                onpointerup={endRowDrag}>⠿</span
-              >
-              <button
-                class="layer-chip"
-                class:text={!!layer.text}
-                style="--chip:{layer.color}"
-                title="Layer colour"
-                onclick={(e) => openColorMenu(e, index)}
-                aria-label="Layer colour"
-              ></button>
-              {#if renamingId === layer.id}
-                <!-- svelte-ignore a11y_autofocus -->
-                <input
-                  class="layer-name-input"
-                  value={layer.name}
-                  autofocus
-                  onblur={(e) => {
-                    layer.name = e.currentTarget.value.trim() || layer.name;
-                    renamingId = null;
-                  }}
-                  onkeydown={(e) => {
-                    if (e.key === "Enter" || e.key === "Escape")
-                      e.currentTarget.blur();
-                    e.stopPropagation();
-                  }}
-                />
-              {:else}
-                <span
-                  class="layer-name"
-                  ondblclick={() => (renamingId = layer.id)}
-                  title="Click to select, double-click to rename, right-click for more"
-                  >{layer.name}</span
-                >
-              {/if}
-              <button
-                class="eye"
-                title={layer.visible ? "Hide layer" : "Show layer"}
-                onclick={(e) => {
-                  e.stopPropagation();
-                  toggleVisible(index);
-                }}
-              >
-                <Icon
-                  name={layer.visible ? "eye-open" : "eye-close"}
-                  size={18}
-                />
-              </button>
-            </div>
-          {/each}
+              <Icon name="chevron" size={24} />
+            </button>
+            <span class="panel-title">{panelTitle(name)}</span>
+            <button
+              class="pin"
+              title="Put this panel back above the toolbar"
+              onclick={() => unpinPanel(name)}>Unpin</button
+            >
+          </div>
+          {#if !collapsed[name]}
+            {#if name === "layers"}{@render layersPanel()}
+            {:else if name === "char"}{@render charPanel()}
+            {:else if name === "effects"}{@render effectsPanel()}
+            {:else if name === "canvas"}{@render canvasPanel()}
+            {:else}{@render toolPanel()}{/if}
+          {/if}
         </div>
-
-        <div class="layer-actions">
-          <button title="New layer" onclick={addLayer}
-            ><Icon name="plus" size={24} /></button
-          >
-          <button title="Duplicate layer" onclick={duplicateLayer}
-            ><Icon name="clone" size={24} /></button
-          >
-          <button
-            title="Delete layer"
-            disabled={layers.length === 1}
-            onclick={deleteLayer}
-          >
-            <Icon name="trash" size={24} />
-          </button>
-        </div>
-      {/if}
+      {/each}
     </div>
-
-    <!-- Panels pinned out of the popover stack under Layers and travel with it. -->
-    {#each pinned as name (name)}
-      <div class="panel">
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="panel-head" {...dockDrag}>
-          <button
-            class="chevron"
-            class:collapsed={collapsed[name]}
-            title={collapsed[name] ? "Expand" : "Collapse"}
-            onclick={() => (collapsed[name] = !collapsed[name])}
-          >
-            <Icon name="chevron" size={24} />
-          </button>
-          <span class="panel-title">{PINNABLE[name]}</span>
-          <button
-            class="pin"
-            title="Put this panel back above the toolbar"
-            onclick={() => unpinPanel(name)}>Unpin</button
-          >
-        </div>
-        {#if !collapsed[name]}
-          {#if name === "char"}{@render charPanel()}
-          {:else if name === "effects"}{@render effectsPanel()}
-          {:else}{@render canvasPanel()}{/if}
-        {/if}
-      </div>
-    {/each}
-  </div>
+  {/if}
 
   {#if menu}
     <div class="panel menu" style="left:{menu.x}px; top:{menu.y}px">
@@ -2348,261 +2934,50 @@
     <div class="panel settings">
       {#if PINNABLE[panel]}
         <div class="settings-head">
-          <span class="panel-title">{PINNABLE[panel]}</span>
-          <button
-            class="pin"
-            title="Dock this panel under Layers"
-            onclick={() => pinPanel(panel)}>Pin</button
-          >
+          <span class="panel-title">{panelTitle(panel)}</span>
+          <div class="head-actions">
+            <button
+              class="pin"
+              title="Dock this panel on the right"
+              onclick={() => pinPanel(panel)}>Pin</button
+            >
+            <button
+              class="pin hide"
+              title="Hide this panel"
+              aria-label="Hide this panel"
+              onclick={() => (panelHidden = true)}>&minus;</button
+            >
+          </div>
         </div>
       {/if}
-      {#if panel === "char"}{@render charPanel()}
+      {#if panel === "layers"}{@render layersPanel()}
+      {:else if panel === "char"}{@render charPanel()}
       {:else if panel === "effects"}{@render effectsPanel()}
       {:else if panel === "canvas"}{@render canvasPanel()}
-      {:else}
-        <div class="settings-body">
-          {#if tool === "select"}
-            <label
-              class="check"
-              title="Click-to-select stops at a different character instead of at blanks"
-            >
-              <input type="checkbox" bind:checked={sameCharOnly} /> Same character
-              only
-            </label>
-          {:else if tool === "text"}
-            {#if activeText}
-              <textarea
-                class="text-input"
-                rows="2"
-                bind:value={layers[activeIndex].text.content}
-                placeholder="Type here"
-              ></textarea>
-              <div class="field">
-                <span class="label">Font</span>
-                <select
-                  value={activeText.family}
-                  onchange={(e) => useFont(e.currentTarget.value)}
-                >
-                  {#each FONTS as f}<option value={f.family}
-                      >{f.family} · {f.note}</option
-                    >{/each}
-                </select>
-                <label class="check"
-                  ><input
-                    type="checkbox"
-                    bind:checked={layers[activeIndex].text.bold}
-                  /> Bold</label
-                >
-              </div>
-              <label class="field" title="Cap height in character cells">
-                <span class="label">Size</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="20"
-                  step="0.5"
-                  bind:value={layers[activeIndex].text.size}
-                />
-                <span class="value">{activeText.size}</span>
-              </label>
-              <div class="field">
-                <span class="label">Style</span>
-                <select bind:value={layers[activeIndex].text.mode}>
-                  <option value="half">Half blocks</option>
-                  <option value="shade">Shading</option>
-                  <option value="solid">Solid</option>
-                </select>
-                <span class="value">
-                  {activeLayer.textBox
-                    ? `${activeLayer.textBox.width}×${activeLayer.textBox.height}`
-                    : "—"}
-                </span>
-              </div>
-              <label
-                class="field"
-                title="Coverage a cell needs before it's inked"
-              >
-                <span class="label">Weight</span>
-                <input
-                  type="range"
-                  min="0.05"
-                  max="0.9"
-                  step="0.05"
-                  bind:value={layers[activeIndex].text.threshold}
-                />
-                <span class="value">{activeText.threshold}</span>
-              </label>
-              <label class="field" title="Extra space between glyphs, in cells">
-                <span class="label">Tracking</span>
-                <input
-                  type="range"
-                  min="-1"
-                  max="4"
-                  step="0.25"
-                  bind:value={layers[activeIndex].text.letterSpacing}
-                />
-                <span class="value">{activeText.letterSpacing}</span>
-              </label>
-              <label
-                class="field"
-                title="Line height as a multiple of the font size"
-              >
-                <span class="label">Leading</span>
-                <input
-                  type="range"
-                  min="0.8"
-                  max="2.5"
-                  step="0.05"
-                  bind:value={layers[activeIndex].text.lineSpacing}
-                />
-                <span class="value">{activeText.lineSpacing}</span>
-              </label>
-              <div class="field">
-                <span class="label">Position</span>
-                <input
-                  type="number"
-                  bind:value={layers[activeIndex].text.x}
-                  title="Column"
-                />
-                <input
-                  type="number"
-                  bind:value={layers[activeIndex].text.y}
-                  title="Row"
-                />
-              </div>
-              {#if !fontReady}
-                <p class="note">
-                  Font unavailable offline — drawing with a system fallback.
-                </p>
-              {/if}
-              {#if textOverflow}
-                <p class="note warn">
-                  Extends past the canvas — the text is kept in full, only the
-                  view is cropped.
-                </p>
-                <button class="wide" onclick={fitCanvasToText}
-                  >Fit canvas to text</button
-                >
-              {/if}
-              <button class="wide" onclick={rasterizeLayer}
-                >Rasterize to draw on it</button
-              >
-            {:else}
-              <p class="note">
-                Click the canvas and type to set characters directly.
-              </p>
-              <button class="wide" onclick={addTextLayer}>New text layer</button
-              >
-            {/if}
-          {:else if inShapeGroup}
-            <div class="field">
-              <span class="label">Shape</span>
-              <div class="segmented">
-                {#each SHAPES as s}
-                  <button
-                    class:active={tool === s.id}
-                    onclick={() => pickTool(s.id)}
-                  >
-                    {s.label} <em>{s.key}</em>
-                  </button>
-                {/each}
-              </div>
-            </div>
-            {#if tool === "path" || tool === "box"}
-              <div class="field">
-                <span class="label">Style</span>
-                <select bind:value={boxStyle}>
-                  {#each BOX_STYLES as s}<option value={s}>{s}</option>{/each}
-                </select>
-              </div>
-            {/if}
-            {#if tool === "rect"}
-              <label class="check"
-                ><input type="checkbox" bind:checked={filled} /> Filled</label
-              >
-            {/if}
-            {#if tool === "line"}
-              <label class="field" title="Brush size ([ and ])">
-                <span class="label">Size</span>
-                <input type="range" min="1" max="9" bind:value={brushSize} />
-                <span class="value">{brushSize}×{brushSize}</span>
-              </label>
-            {/if}
-            {#if tool === "path"}
-              <p class="note">
-                Click each corner. Enter, Esc, double-click or right-click
-                releases the line so you can start the next one.
-              </p>
-            {/if}
-          {:else}
-            <label class="field" title="Brush size ([ and ])">
-              <span class="label"
-                >{tool === "brush" && pressureSize ? "Max size" : "Size"}</span
-              >
-              <input type="range" min="1" max="9" bind:value={brushSize} />
-              <span class="value">{brushSize}×{brushSize}</span>
-            </label>
-            {#if tool === "brush"}
-              <div class="field" title="What varies the brush as you draw">
-                <span class="label">Dynamics</span>
-                <div class="segmented">
-                  <button
-                    class:active={dynamics === "pressure"}
-                    onclick={() => (dynamics = "pressure")}>Pressure</button
-                  >
-                  <button
-                    class:active={dynamics === "speed"}
-                    onclick={() => (dynamics = "speed")}>Speed</button
-                  >
-                  <button
-                    class:active={dynamics === "off"}
-                    onclick={() => (dynamics = "off")}>Off</button
-                  >
-                </div>
-              </div>
-              <div class="field">
-                <label class="check" title="Harder press paints a wider dab">
-                  <input type="checkbox" bind:checked={pressureSize} /> Force → size
-                </label>
-                <label
-                  class="check"
-                  title="Harder press picks a denser character"
-                >
-                  <input type="checkbox" bind:checked={pressureDensity} /> Force
-                  → density
-                </label>
-              </div>
-              {#if pressureDensity}
-                <div class="field">
-                  <span class="label">Ramp</span>
-                  <select bind:value={rampName}>
-                    {#each Object.keys(RAMPS) as r}<option value={r}>{r}</option
-                      >{/each}
-                  </select>
-                </div>
-              {/if}
-              <p class="note">{dynamicsNote}</p>
-            {/if}
-          {/if}
-        </div>
-      {/if}
+      {:else}{@render toolPanel()}{/if}
     </div>
   {/if}
 
   <div class="toolbar">
     <div class="chars">
-      <button
+      <span
         class="swatch back"
-        class:armed={activeSlot === "secondary"}
-        title="Secondary character — drawn with the right button"
-        onclick={() => pickSlot("secondary")}>{showChar(altChar)}</button
+        title="Secondary character — drawn with the right button; press X to swap it in"
+        aria-hidden="true">{showChar(altChar)}</span
       >
       <button
         class="swatch front"
-        class:armed={activeSlot === "primary"}
         title="Primary character — drawn with the left button"
-        onclick={() => pickSlot("primary")}>{showChar(char)}</button
+        onclick={pickChar}>{showChar(char)}</button
       >
+      <button
+        class="swap"
+        title="Swap the primary and secondary characters (X)"
+        aria-label="Swap characters"
+        onclick={swapChars}
+      >
+        <Icon name="swap" size={20} />
+      </button>
     </div>
 
     <span class="divider"></span>
@@ -2646,7 +3021,18 @@
     <div class="tool-group">
       <button
         class="tool"
-        class:active={panel === "effects" || pinned.includes("effects")}
+        class:active={panelPopped("layers")}
+        class:open={pinned.includes("layers")}
+        title="Show or hide the layer stack"
+        onclick={() => togglePanel("layers")}
+      >
+        <Icon name="layers" size={34} />
+        <span class="tool-label">Layers</span>
+      </button>
+      <button
+        class="tool"
+        class:active={panelPopped("effects")}
+        class:open={pinned.includes("effects")}
         title="Skew, rotate, flip and keystone the active layer"
         onclick={() => togglePanel("effects")}
       >
@@ -2655,8 +3041,9 @@
       </button>
       <button
         class="tool"
-        class:active={panel === "canvas" || pinned.includes("canvas")}
-        title="Canvas size, zoom and cell spacing"
+        class:active={panelPopped("canvas")}
+        class:open={pinned.includes("canvas")}
+        title="Canvas size, type size and cell spacing"
         onclick={() => togglePanel("canvas")}
       >
         <Icon name="canvas" size={34} />
@@ -2668,6 +3055,11 @@
   <div class="status">
     <span>{cols} × {rows}</span>
     <span>{hover ? `${hover[0]}, ${hover[1]}` : "–"}</span>
+    <button
+      class="view-reset"
+      title="Reset pan and zoom (⌘0). Scroll to pan, pinch or ⌘-scroll to zoom, space or middle-drag to pan."
+      onclick={resetView}>{Math.round(view.z * 100)}%</button
+    >
   </div>
 </div>
 
@@ -2685,14 +3077,26 @@
 
   .viewport {
     height: 100%;
-    overflow: auto;
+    /* Navigation is the view transform, not scrollbars, so nothing scrolls here. */
+    overflow: hidden;
+    touch-action: none;
     display: flex;
-    /* Asymmetric padding parks the canvas where the design has it — just above centre —
-       and keeps the bottom clear of the toolbar when the canvas is tall enough to scroll. */
+    /* Fixed, so the canvas never shifts as panels open and close — it clears the toolbar and
+       lets the settings popover float over it. Pin a panel to get the space back. */
     padding: 96px 24px 136px;
+  }
+  .viewport.pannable {
+    cursor: grab;
+  }
+  .viewport.panning {
+    cursor: grabbing;
   }
   .stage {
     margin: auto;
+    /* Pan and zoom ride on top of the centred layout, so the untransformed position stays
+       put and zoom-to-cursor can measure against it. */
+    transform-origin: 0 0;
+    will-change: transform;
   }
 
   .grid {
@@ -2708,6 +3112,8 @@
     user-select: none;
     touch-action: none;
     white-space: pre;
+    /* Keeps the gridlines' negative z-index inside the canvas, under the characters. */
+    isolation: isolate;
   }
   .grid.text-tool {
     cursor: text;
@@ -2738,6 +3144,7 @@
   .gridlines {
     position: absolute;
     inset: 0;
+    z-index: -1; /* behind the art, so block characters read as solid shapes */
     pointer-events: none;
     background-image: linear-gradient(
         to right,
@@ -2764,6 +3171,22 @@
     border: 1px dashed var(--accent);
   }
 
+  /* Cursor guides: a band across the full row and column under the pointer, so a cell
+     can be lined up against distant ones. */
+  .guide {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .guide.row {
+    left: 0;
+    right: 0;
+  }
+  .guide.col {
+    top: 0;
+    bottom: 0;
+  }
+
   .hover-cell {
     position: absolute;
     pointer-events: none;
@@ -2787,6 +3210,11 @@
   }
 
   /* ── Floating panels ─────────────────────────────────────────────────────── */
+
+  /* Clicking shouldn't leave the browser's focus ring behind; keyboard focus still shows. */
+  button:focus:not(:focus-visible) {
+    outline: none;
+  }
 
   .panel {
     position: absolute;
@@ -2827,15 +3255,18 @@
     flex: none;
   }
 
-  .layers {
+  .layers-body {
     display: flex;
     flex-direction: column;
+    /* Matches the dock width, so the panel is the same size wherever it lives. */
+    min-width: 265px;
   }
   .panel-head {
     display: flex;
     align-items: center;
     gap: 10px;
     padding: 10px;
+    border-bottom: 1px solid var(--divider);
     cursor: grab;
     touch-action: none;
   }
@@ -3059,7 +3490,9 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 12px 16px 0;
+    /* The buttons sit flush in the corner: right gutter matches the 10px above them. */
+    padding: 10px 10px 10px 16px;
+    border-bottom: 1px solid var(--divider);
   }
   .settings-body {
     display: flex;
@@ -3072,7 +3505,12 @@
     padding: 16px;
   }
   .settings-head + .settings-body {
-    padding-top: 4px;
+    padding-top: 12px;
+  }
+
+  .head-actions {
+    display: flex;
+    gap: 6px;
   }
 
   .pin {
@@ -3089,6 +3527,13 @@
   }
   .pin:hover {
     opacity: 1;
+  }
+  /* The minus is a square button so it reads as an icon next to the wider Pin label. */
+  .hide {
+    width: 26px;
+    padding: 4px 0;
+    font-size: 14px;
+    line-height: 1;
   }
 
   /* Docked, a panel has 245px of usable width instead of ~640, so the roomy popover
@@ -3150,6 +3595,8 @@
     font-size: 11px;
     line-height: 1.5;
     color: var(--ink-dim);
+  }
+  .note.pre {
     white-space: pre-line;
   }
   .note.warn {
@@ -3196,6 +3643,7 @@
   }
 
   .settings-body input[type="number"],
+  .settings-body input.glyph,
   .settings-body select,
   .text-input,
   .char-input {
@@ -3210,6 +3658,11 @@
   }
   .settings-body input[type="number"] {
     width: 72px;
+  }
+  .settings-body input.glyph {
+    width: 44px;
+    font-family: var(--art-font);
+    text-align: center;
   }
   .settings-body select {
     flex: 1;
@@ -3431,24 +3884,36 @@
     color: var(--ink);
     background: var(--panel);
     border: 1px solid var(--ink);
-    cursor: pointer;
   }
-  /* The armed slot sits in front, top-left, the way a foreground swatch does. */
+  /* Primary sits top-left, in front; the secondary is a read-only peek at what X swaps in. */
   .swatch.back {
     left: 36px;
     top: 27px;
     font-size: 16px;
     opacity: 0.3;
+    pointer-events: none;
   }
   .swatch.front {
     left: 0;
     top: 0;
-  }
-  .swatch.armed {
+    z-index: 1;
     border-color: var(--accent);
+    cursor: pointer;
   }
-  .swatch.back.armed {
-    opacity: 0.6;
+  /* The X-key swap, sitting in the corner the two swatches leave free. */
+  .swap {
+    position: absolute;
+    left: 65px;
+    top: 3px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--ink);
+    opacity: 0.7;
+    cursor: pointer;
+  }
+  .swap:hover {
+    opacity: 1;
   }
 
   .tool-group {
@@ -3458,6 +3923,7 @@
     flex: none;
   }
   .tool {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -3480,6 +3946,22 @@
     background: var(--accent);
     color: #000;
     opacity: 1;
+  }
+  /* A panel button whose panel is pinned in the dock: a thin accent frame and a dot in the
+     corner, per the Figma variant. It stays at resting opacity so it doesn't read as a
+     second armed tool: only one tool can be live, but several panels can be. */
+  .tool.open {
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .tool.open::after {
+    content: "";
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
   }
   .tool-label {
     display: flex;
@@ -3512,6 +3994,19 @@
     color: var(--ink-faint);
     font-variant-numeric: tabular-nums;
     pointer-events: none;
+  }
+  .view-reset {
+    pointer-events: auto;
+    padding: 0;
+    font: inherit;
+    text-transform: inherit;
+    color: inherit;
+    background: none;
+    border: none;
+    cursor: pointer;
+  }
+  .view-reset:hover {
+    color: var(--ink);
   }
 
   .toast {

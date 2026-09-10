@@ -10,11 +10,14 @@
   import eyeOpen from './icons/eye-open.svg?raw'
   import fill from './icons/fill.svg?raw'
   import fx from './icons/fx.svg?raw'
+  import join from './icons/join.svg?raw'
+  import layers from './icons/layers.svg?raw'
   import move from './icons/move.svg?raw'
   import path from './icons/path.svg?raw'
   import pencil from './icons/pencil.svg?raw'
   import plus from './icons/plus.svg?raw'
   import select from './icons/select.svg?raw'
+  import swap from './icons/swap.svg?raw'
   import text from './icons/text.svg?raw'
   import trash from './icons/trash.svg?raw'
 
@@ -28,11 +31,14 @@
     'eye-open': eyeOpen,
     fill,
     fx,
+    join,
+    layers,
     move,
     path,
     pencil,
     plus,
     select,
+    swap,
     text,
     trash,
   }

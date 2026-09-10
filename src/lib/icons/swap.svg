@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="switcher" transform="translate(-0.065 2.887)">
+<path d="M5.8151 1.11342L1.3151 5.11342H5.8151V1.11342Z" fill="currentColor"/>
+<path d="M14.3151 13.1134L18.8151 9.11342L14.3151 9.11342V13.1134Z" fill="currentColor"/>
+<path d="M18.8151 5.11342H5.8151M5.8151 5.11342H1.3151L5.8151 1.11342V5.11342ZM1.3151 9.11342L14.3151 9.11342M14.3151 9.11342L18.8151 9.11342L14.3151 13.1134V9.11342Z" stroke="currentColor"/>
+</g>
+</svg>
