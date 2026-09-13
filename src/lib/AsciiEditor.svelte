@@ -24,6 +24,7 @@
   import { FONTS, TEXT_DEFAULTS, loadFont, renderText } from "./textRender.js";
   import { loadSession, saveSession } from "./storage.js";
   import Icon from "./Icon.svelte";
+  import { glitch } from "./glitch.js";
 
   // Grouped so the palette can be scanned by intent rather than by codepoint.
   // Both ramps run light → dark, which is the order you want for gradients.
@@ -1987,25 +1988,34 @@
     if (inShapeGroup) lastShape = tool;
   });
 
-  // Panels that can be torn out of the popover and docked on the right. The tool settings
-  // aren't here: they belong to whatever is armed, so they have nowhere fixed to live.
+  // Panels that can be torn out of the popover and docked on the right. Tool settings are
+  // pinned per tool under a "tool:" key — a docked Pencil panel stays a Pencil panel when the
+  // brush is armed — with the shape group sharing one key, as it shares one button.
   const PINNABLE = {
-    tool: "Tool",
     layers: "Layers",
     char: "Characters",
     effects: "Effects",
     canvas: "Canvas"
   };
+  const TOOL_PREFIX = "tool:";
+  const TOOL_IDS = new Set([...SELECT_TOOLS, ...DRAW_TOOLS].map((t) => t.id));
+  const pinnableName = (name) =>
+    name.startsWith(TOOL_PREFIX)
+      ? TOOL_IDS.has(name.slice(TOOL_PREFIX.length))
+      : name in PINNABLE;
 
   // Panel names, in dock order top to bottom. Layers starts docked, where it always lived;
   // its toolbar button hides it and Pin moves it into the popover like any other panel.
   // A restored session keeps whatever arrangement it was left in.
   let pinned = $state(
-    (prefs.pinned ?? ["layers"]).filter((name) => name in PINNABLE)
+    (prefs.pinned ?? ["layers"]).filter(pinnableName)
   );
 
   /** What the floating panel above the toolbar shows. 'tool' follows the armed tool. */
   let panel = $state("tool");
+  // The dock key of the armed tool's settings, and of whatever the popover shows.
+  const toolKey = $derived(TOOL_PREFIX + (inShapeGroup ? "shape" : tool));
+  const panelKey = $derived(panel === "tool" ? toolKey : panel);
   let toolbarEl = $state(null);
   let settingsEl = $state(null);
   // Popover left edge in page pixels; null falls back to centred over the toolbar.
@@ -2013,7 +2023,8 @@
 
   /**
    * Park the popover above the toolbar button that owns what it shows — the armed tool, the
-   * swatch, or a panel toggle — and keep it on screen at the edges.
+   * swatch, or a panel toggle — without letting it stick out past the toolbar's own edges.
+   * A popover wider than the toolbar is simply centred over it.
    */
   function placePopover() {
     if (!toolbarEl || !settingsEl) return;
@@ -2024,13 +2035,13 @@
       return;
     }
     const a = anchor.getBoundingClientRect();
+    const t = toolbarEl.getBoundingClientRect();
     const width = settingsEl.offsetWidth;
-    const margin = 12;
+    const centred = a.left + a.width / 2 - width / 2;
     popoverLeft = Math.round(
-      Math.max(
-        margin,
-        Math.min(window.innerWidth - width - margin, a.left + a.width / 2 - width / 2)
-      )
+      width >= t.width
+        ? t.left + t.width / 2 - width / 2
+        : Math.max(t.left, Math.min(t.right - width, centred))
     );
   }
 
@@ -2049,7 +2060,7 @@
   // panel again, so a panel that covers the artwork can be pushed out of the way in place.
   let panelHidden = $state(false);
   const panelOpen = $derived(
-    panelHidden || pinned.includes(panel)
+    panelHidden || pinned.includes(panelKey)
       ? false
       : panel !== "tool" || hasToolSettings
   );
@@ -2064,14 +2075,23 @@
     panelHidden = false;
   }
 
-  // Docked, the tool panel is named after whatever is armed rather than "Tool".
-  const toolTitle = $derived(
-    inShapeGroup
+  // A tool panel is named after its tool rather than "Tool"; the shape group's after
+  // whichever shape is live.
+  const toolLabel = (id) =>
+    id === "shape"
       ? shapeButton.label
-      : ([...SELECT_TOOLS, ...DRAW_TOOLS].find((t) => t.id === tool)?.label ??
-        tool)
-  );
-  const panelTitle = (name) => (name === "tool" ? toolTitle : PINNABLE[name]);
+      : ([...SELECT_TOOLS, ...DRAW_TOOLS].find((t) => t.id === id)?.label ?? id);
+  const panelTitle = (name) =>
+    name === "tool"
+      ? toolLabel(inShapeGroup ? "shape" : tool)
+      : name.startsWith(TOOL_PREFIX)
+        ? toolLabel(name.slice(TOOL_PREFIX.length))
+        : PINNABLE[name];
+  /** Which tool a docked tool panel configures; the shape group shows the live shape. */
+  function dockTool(name) {
+    const id = name.slice(TOOL_PREFIX.length);
+    return id === "shape" ? shapeButton.id : id;
+  }
   function pinPanel(name) {
     if (!pinned.includes(name)) pinned = [...pinned, name];
     panel = "tool";
@@ -2156,7 +2176,7 @@
     event.preventDefault();
     const head = event.currentTarget.getBoundingClientRect();
     tearOff = {
-      name: panel,
+      name: panelKey,
       x: event.clientX,
       y: event.clientY,
       // The grab point within the header, capped so it still lands inside the narrower dock.
@@ -2614,11 +2634,11 @@
   </div>
 {/snippet}
 
-{#snippet toolPanel()}
+{#snippet toolPanel(t)}
   <div class="settings-body">
-    {#if !hasToolSettings}
+    {#if t === "move" || t === "fill"}
       <p class="note">Nothing to configure for this tool.</p>
-    {:else if tool === "select"}
+    {:else if t === "select"}
       <label
         class="check"
         title="Click-to-select stops at a different character instead of at blanks"
@@ -2626,7 +2646,7 @@
         <input type="checkbox" bind:checked={sameCharOnly} /> Same character
         only
       </label>
-    {:else if tool === "text"}
+    {:else if t === "text"}
       {#if activeText}
         <textarea
           class="text-input"
@@ -2799,7 +2819,7 @@
         <button class="wide" onclick={addTextLayer}>New text layer</button
         >
       {/if}
-    {:else if inShapeGroup}
+    {:else if SHAPES.some((s) => s.id === t)}
       <!-- One icon per shape: seven words don't fit the dock, and the panel title already
            names whichever is live. -->
       <div class="field shape-row" role="group" aria-label="Shape">
@@ -2816,7 +2836,7 @@
           </button>
         {/each}
       </div>
-      {#if tool === "path" || tool === "box"}
+      {#if t === "path" || t === "box"}
         <div class="field">
           <span class="label">Style</span>
           <select bind:value={boxStyle}>
@@ -2824,7 +2844,7 @@
           </select>
         </div>
       {/if}
-      {#if tool === "triangle"}
+      {#if t === "triangle"}
         <div class="field">
           <span class="label">Points</span>
           <div class="segmented">
@@ -2840,30 +2860,30 @@
           </div>
         </div>
       {/if}
-      {#if ["rect", "ellipse", "triangle", "diamond"].includes(tool)}
+      {#if ["rect", "ellipse", "triangle", "diamond"].includes(t)}
         <label class="check"
           ><input type="checkbox" bind:checked={filled} /> Filled</label
         >
       {/if}
-      {#if tool !== "path"}
+      {#if t !== "path"}
         <p class="note">
-          {tool === "line"
+          {t === "line"
             ? "Hold Shift to snap to horizontal, vertical or diagonal."
-            : tool === "triangle"
+            : t === "triangle"
               ? "Hold Shift for an equilateral triangle."
-              : tool === "ellipse"
+              : t === "ellipse"
                 ? "Hold Shift for a circle."
                 : "Hold Shift for a square."}
         </p>
       {/if}
-      {#if tool === "line"}
+      {#if t === "line"}
         <label class="field" title="Brush size ([ and ])">
           <span class="label">Size</span>
           <input type="range" min="1" max="9" bind:value={brushSize} />
           <span class="value">{brushSize}×{brushSize}</span>
         </label>
       {/if}
-      {#if tool === "path"}
+      {#if t === "path"}
         <p class="note">
           Click each corner. Enter, Esc, double-click or right-click
           releases the line so you can start the next one.
@@ -2872,12 +2892,12 @@
     {:else}
       <label class="field" title="Brush size ([ and ])">
         <span class="label"
-          >{tool === "brush" && pressureSize ? "Max size" : "Size"}</span
+          >{t === "brush" && pressureSize ? "Max size" : "Size"}</span
         >
         <input type="range" min="1" max="9" bind:value={brushSize} />
         <span class="value">{brushSize}×{brushSize}</span>
       </label>
-      {#if tool === "brush"}
+      {#if t === "brush"}
         <hr class="sep" />
         <div class="field" title="What varies the brush as you draw">
           <span class="label">Dynamics</span>
@@ -3034,7 +3054,7 @@
             {:else if name === "char"}{@render charPanel()}
             {:else if name === "effects"}{@render effectsPanel()}
             {:else if name === "canvas"}{@render canvasPanel()}
-            {:else}{@render toolPanel()}{/if}
+            {:else}{@render toolPanel(dockTool(name))}{/if}
           {/if}
         </div>
       {/each}
@@ -3118,30 +3138,28 @@
       style={popoverLeft !== null ? `left:${popoverLeft}px` : ""}
       bind:this={settingsEl}
     >
-      {#if PINNABLE[panel]}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="settings-head" onpointerdown={startTearOff}>
-          <span class="panel-title">{panelTitle(panel)}</span>
-          <div class="head-actions">
-            <button
-              class="pin"
-              title="Unpin this panel into the dock on the right — or drag the header"
-              onclick={() => pinPanel(panel)}>Unpin</button
-            >
-            <button
-              class="pin hide"
-              title="Hide this panel"
-              aria-label="Hide this panel"
-              onclick={() => (panelHidden = true)}>&minus;</button
-            >
-          </div>
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="settings-head" onpointerdown={startTearOff}>
+        <span class="panel-title">{panelTitle(panel)}</span>
+        <div class="head-actions">
+          <button
+            class="pin"
+            title="Unpin this panel into the dock on the right — or drag the header"
+            onclick={() => pinPanel(panelKey)}>Unpin</button
+          >
+          <button
+            class="pin hide"
+            title="Hide this panel"
+            aria-label="Hide this panel"
+            onclick={() => (panelHidden = true)}>&minus;</button
+          >
         </div>
-      {/if}
+      </div>
       {#if panel === "layers"}{@render layersPanel()}
       {:else if panel === "char"}{@render charPanel()}
       {:else if panel === "effects"}{@render effectsPanel()}
       {:else if panel === "canvas"}{@render canvasPanel()}
-      {:else}{@render toolPanel()}{/if}
+      {:else}{@render toolPanel(tool)}{/if}
     </div>
   {/if}
 
@@ -3175,12 +3193,16 @@
         <button
           class="tool"
           class:active={tool === t.id}
+          class:open={pinned.includes(TOOL_PREFIX + t.id)}
           data-anchor={t.id}
           title={t.hint}
           onclick={() => pickTool(t.id)}
         >
           <Icon name={t.icon} size={34} />
-          <span class="tool-label">{t.label} <em>{t.key}</em></span>
+          <span class="tool-label">
+            <span use:glitch={{ text: t.label, live: tool === t.id }}>{t.label}</span>
+            <em>{t.key}</em>
+          </span>
         </button>
       {/each}
     </div>
@@ -3190,16 +3212,20 @@
     <div class="tool-group">
       {#each DRAW_TOOLS as t}
         {@const isShapeButton = t.id === "shape"}
+        {@const label = isShapeButton ? shapeButton.label : t.label}
         <button
           class="tool"
           class:active={isShapeButton ? inShapeGroup : tool === t.id}
+          class:open={pinned.includes(TOOL_PREFIX + t.id)}
           data-anchor={t.id}
           title={t.hint}
           onclick={() => pickTool(t.id)}
         >
           <Icon name={t.icon} size={34} />
           <span class="tool-label">
-            {isShapeButton ? shapeButton.label : t.label}
+            <span use:glitch={{ text: label, live: isShapeButton ? inShapeGroup : tool === t.id }}>
+              {label}
+            </span>
             <em>{isShapeButton ? shapeButton.key : t.key}</em>
           </span>
         </button>
@@ -3218,7 +3244,9 @@
         onclick={() => togglePanel("layers")}
       >
         <Icon name="layers" size={34} />
-        <span class="tool-label">Layers</span>
+        <span class="tool-label">
+          <span use:glitch={{ text: "Layers", live: panelPopped("layers") }}>Layers</span>
+        </span>
       </button>
       <button
         class="tool"
@@ -3229,7 +3257,9 @@
         onclick={() => togglePanel("effects")}
       >
         <Icon name="fx" size={34} />
-        <span class="tool-label">Effects</span>
+        <span class="tool-label">
+          <span use:glitch={{ text: "Effects", live: panelPopped("effects") }}>Effects</span>
+        </span>
       </button>
       <button
         class="tool"
@@ -3240,7 +3270,9 @@
         onclick={() => togglePanel("canvas")}
       >
         <Icon name="canvas" size={34} />
-        <span class="tool-label">Canvas</span>
+        <span class="tool-label">
+          <span use:glitch={{ text: "Canvas", live: panelPopped("canvas") }}>Canvas</span>
+        </span>
       </button>
     </div>
   </div>
@@ -4166,9 +4198,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
     width: 72px;
-    height: 80px;
+    height: 70px;
     flex: none;
     padding: 10px;
     background: none;
@@ -4201,18 +4232,44 @@
     border-radius: 50%;
     background: var(--accent);
   }
+  /* Per the Figma states: an idle button is just a centred icon; the armed one (and, here,
+     the hovered or focused one) grows a label 4px under the icon. The label collapses rather
+     than hides so the icon slides between the two centrings instead of jumping. */
   .tool-label {
     display: flex;
     align-items: center;
     justify-content: center;
     /* Wider than the design's 2px: the negative tracking pulls the shortcut into the label. */
     gap: 4px;
-    height: 15px;
+    height: 0;
+    margin-top: 0;
     width: 100%;
+    overflow: hidden;
     font-size: 11px;
+    line-height: 15px;
     letter-spacing: -0.05em;
     text-transform: uppercase;
     white-space: nowrap;
+    opacity: 0;
+    transition:
+      height 0.12s,
+      margin-top 0.12s,
+      opacity 0.12s;
+  }
+  .tool:hover .tool-label,
+  .tool:focus-visible .tool-label,
+  .tool.active .tool-label {
+    height: 15px;
+    margin-top: 4px;
+    opacity: 1;
+  }
+  /* No hover on touch: keep every label visible there. */
+  @media (hover: none) {
+    .tool-label {
+      height: 15px;
+      margin-top: 4px;
+      opacity: 1;
+    }
   }
   .tool-label em {
     font-style: normal;
