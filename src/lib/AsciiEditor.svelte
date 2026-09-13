@@ -2296,7 +2296,22 @@
   const closeMenus = () => {
     menu = null;
     colorMenu = null;
+    about = false;
   };
+
+  // ── Brand ──────────────────────────────────────────────────────────────────
+  // The wordmark is block glyphs straight from the Figma file — it's ASCII art, so it's set
+  // in the art font rather than an image. The links under it only show while the pointer
+  // (or keyboard focus) is on the block, and About opens a short note in place.
+  const REPO_URL = "https://github.com/PavelLaptev/ascii-editor";
+  const LOGO = [
+    "▄████▄ ██████ ██  ▄██ ██",
+    "██  ██ ██▄▄▄▄ ██▄██▀  ██",
+    "██████ ▀▀▀▀██ ██▀██▄  ██",
+    "██  ██ ██████ ██  ▀██ ██"
+  ];
+  let brandHover = $state(false);
+  let about = $state(false);
 
   // ── Persistence ────────────────────────────────────────────────────────────
   // The document and display preferences go to localStorage so a reload picks up where the
@@ -3275,6 +3290,49 @@
         </span>
       </button>
     </div>
+  </div>
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="brand"
+    onpointerenter={() => (brandHover = true)}
+    onpointerleave={() => (brandHover = false)}
+  >
+    <div class="logo" role="img" aria-label="ASKI">
+      {#each LOGO as line}<span>{line}</span>{/each}
+    </div>
+    <nav class="brand-links" class:shown={brandHover || about} aria-label="About ASKI">
+      <button
+        class="brand-link"
+        class:active={about}
+        aria-expanded={about}
+        onclick={(e) => {
+          e.stopPropagation();
+          about = !about;
+        }}
+      >
+        <span use:glitch={{ text: "About", live: brandHover || about }}>About</span>
+      </button>
+      <a class="brand-link" href={REPO_URL} target="_blank" rel="noopener">
+        <span use:glitch={{ text: "Source code", live: brandHover }}>Source code</span>
+      </a>
+    </nav>
+    {#if about}
+      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+      <div class="panel about" onclick={(e) => e.stopPropagation()}>
+        <p>
+          <strong>ASKI</strong> is an ASCII art editor. Draw with characters using a pencil,
+          brush, shapes and text, on layers you can skew, rotate and flip. Export as text or
+          an image.
+        </p>
+        <p>It runs in your browser and keeps your work on this device.</p>
+        <p>
+          Made by <a href="https://github.com/PavelLaptev" target="_blank" rel="noopener"
+            >Pavel Laptev</a
+          >.
+        </p>
+      </div>
+    {/if}
   </div>
 
   <div class="status">
@@ -4277,6 +4335,83 @@
   }
 
   /* ── Status & toast ──────────────────────────────────────────────────────── */
+
+  /* ── Brand ─────────────────────────────────────────────────────────────────── */
+
+  .brand {
+    position: absolute;
+    left: 32px;
+    top: 28px;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    /* A little hit area below the links, so the pointer can drift off the last row without
+       the links vanishing under it. */
+    padding-bottom: 8px;
+  }
+  .logo {
+    display: flex;
+    flex-direction: column;
+    font-family: var(--art-font);
+    font-size: 9px;
+    line-height: 1.2;
+    white-space: pre;
+    color: var(--accent);
+    user-select: none;
+  }
+  .brand-links {
+    display: flex;
+    gap: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: -0.05em;
+    text-transform: uppercase;
+    opacity: 0;
+    transform: translateY(-4px);
+    transition:
+      opacity 120ms,
+      transform 120ms;
+    pointer-events: none;
+  }
+  .brand-links.shown,
+  .brand:focus-within .brand-links {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+  .brand-link {
+    padding: 0;
+    background: none;
+    border: none;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    color: var(--accent);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .brand-link:hover,
+  .brand-link.active {
+    text-decoration: underline;
+  }
+  .about {
+    top: 100%;
+    left: 0;
+    width: 260px;
+    padding: 12px 14px;
+    line-height: 1.4;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .about p {
+    margin: 0 0 8px;
+  }
+  .about p:last-child {
+    margin-bottom: 0;
+  }
+  .about a {
+    color: var(--accent);
+  }
 
   .status {
     position: absolute;
