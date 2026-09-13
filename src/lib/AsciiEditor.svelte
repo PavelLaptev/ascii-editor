@@ -118,23 +118,52 @@
     Dots: ["·", "∙", "•", "●"]
   };
 
-  // Every layer draws in its own colour, picked from the chip in the layers panel.
-  const DEFAULT_INK = "#ffffff";
-  const LAYER_COLORS = [
-    "#ffffff",
-    "#9aa3ad",
-    "#00eaff",
-    "#6f9dff",
-    "#c58cff",
-    "#ff5470",
-    "#ff9a3d",
-    "#ffd644",
-    "#5ce65c"
-  ];
+  // Every layer draws in its own colour, picked from the chip in the layers panel. Each
+  // theme has its own set, position for position: the first entry is the default ink, and
+  // the rest are the same hues pulled bright for the dark ground or deep for the light one.
+  const THEME_PALETTES = {
+    dark: [
+      "#ffffff",
+      "#9aa3ad",
+      "#00eaff",
+      "#6f9dff",
+      "#c58cff",
+      "#ff5470",
+      "#ff9a3d",
+      "#ffd644",
+      "#5ce65c"
+    ],
+    light: [
+      "#000000",
+      "#5b636b",
+      "#0086a5",
+      "#2c5fd6",
+      "#7a3fd6",
+      "#d1173a",
+      "#d66a00",
+      "#a88500",
+      "#1f8f1f"
+    ]
+  };
 
   // Whatever the last session left in localStorage, or null on a first visit.
   const saved = loadSession();
   const prefs = saved?.prefs ?? {};
+
+  // "dark" is the design; "light" is its opposite. Stamped on <html> so the tokens in
+  // app.css swap, and applied right away so the first paint is already the saved theme.
+  // The favicon follows: one file per theme, so the tab matches the page.
+  let theme = $state(prefs.theme === "light" ? "light" : "dark");
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    const icon = document.querySelector("link[rel='icon']");
+    if (icon) icon.href = t === "light" ? "/favicon-light.svg" : "/favicon.svg";
+  }
+  applyTheme(theme);
+  $effect(() => applyTheme(theme));
+
+  const LAYER_COLORS = $derived(THEME_PALETTES[theme]);
+  const DEFAULT_INK = $derived(LAYER_COLORS[0]);
 
   let cols = $state(saved?.cols ?? 80);
   let rows = $state(saved?.rows ?? 24);
@@ -600,7 +629,7 @@
   let char = $state(prefs.char ?? "#");
   let altChar = $state(prefs.altChar ?? " ");
   let boxStyle = $state(
-    BOX_STYLES.includes(prefs.boxStyle) ? prefs.boxStyle : "single"
+    BOX_STYLES.includes(prefs.boxStyle) ? prefs.boxStyle : "double"
   );
   let filled = $state(false); // rect, ellipse, triangle and diamond: solid rather than outline
   let triangleDir = $state("up");
@@ -1072,6 +1101,7 @@
   /** Zoom by `factor`, keeping whatever sits under (clientX, clientY) pinned there. */
   function zoomAt(clientX, clientY, factor) {
     const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.z * factor));
+    viewTouched = true;
     if (z === view.z || !stageEl) return;
     // The stage's own rect already carries the current pan and zoom, so the offset from its
     // corner is the scaled distance to the cursor — no need to know the untransformed spot.
@@ -1091,7 +1121,38 @@
         })()
       : undefined;
 
-  const resetView = () => (view = { x: 0, y: 0, z: 1 });
+  // Set by any pan or zoom the user makes; until then the view follows the window, so
+  // a canvas that opens wider than a tablet's screen is fitted, and refitted on rotation.
+  let viewTouched = false;
+
+  /**
+   * Zoom out until the whole canvas is on screen, or back to 100% when it already fits. The
+   * untransformed stage is centred by the layout, so the offset only has to undo what the
+   * scale pulls toward the stage's corner — unless the stage overflows, in which case the
+   * layout leaves it at the top-left edge and the offset centres it outright.
+   */
+  function fitView() {
+    if (!stageEl || !viewportEl) return;
+    const pad = getComputedStyle(viewportEl);
+    const availW =
+      viewportEl.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight);
+    const availH =
+      viewportEl.clientHeight - parseFloat(pad.paddingTop) - parseFloat(pad.paddingBottom);
+    const w = stageEl.offsetWidth;
+    const h = stageEl.offsetHeight;
+    const z = Math.max(MIN_ZOOM, Math.min(1, availW / w, availH / h));
+    view = {
+      z,
+      x: w <= availW ? (w * (1 - z)) / 2 : (availW - w * z) / 2,
+      y: h <= availH ? (h * (1 - z)) / 2 : (availH - h * z) / 2
+    };
+    viewTouched = false;
+  }
+  const resetView = fitView;
+
+  $effect(() => {
+    if (stageEl && viewportEl) fitView();
+  });
 
   // Svelte registers wheel handlers as passive, where preventDefault is a no-op, so this
   // one is attached by hand to stop the browser page-zooming on a pinch.
@@ -1105,6 +1166,7 @@
   /** Trackpad and wheel: pinch (or ctrl/⌘ held) zooms, everything else pans. */
   function onWheel(event) {
     event.preventDefault();
+    viewTouched = true;
     if (event.ctrlKey || event.metaKey) {
       zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY / 240));
     } else {
@@ -1119,12 +1181,13 @@
   function onViewPointerDown(event) {
     if (!wantsPan(event)) return;
     event.preventDefault();
+    viewTouched = true;
     panning = { x: event.clientX, y: event.clientY };
     viewportEl?.setPointerCapture?.(event.pointerId);
   }
 
   function onViewPointerMove(event) {
-    if (!panning) return;
+    if (onTouchMove(event) || !panning) return;
     view = {
       ...view,
       x: view.x + event.clientX - panning.x,
@@ -1134,6 +1197,63 @@
   }
 
   const endPan = () => (panning = null);
+  function onViewPointerUp(event) {
+    endPan();
+    onTouchUp(event);
+  }
+
+  // ── Touch ──────────────────────────────────────────────────────────────────
+  // One finger works the armed tool; two pan and pinch-zoom the view. The second finger is
+  // caught on the way down, in the capture phase, so the canvas never sees it, and whatever
+  // the first finger had started is thrown away: it was the start of a pan, not a mark. Pens
+  // aren't tracked here, so a resting finger never interrupts a stylus stroke.
+  const touches = new Map(); // pointerId -> { x, y } for the fingers currently down
+  let gesturing = false; // from the second finger's touch until every finger lifts
+
+  function onTouchDownCapture(event) {
+    if (event.pointerType !== "touch") return;
+    touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (touches.size < 2 && !gesturing) return;
+    event.stopPropagation();
+    if (!gesturing) {
+      gesturing = true;
+      cancelStroke();
+    }
+  }
+
+  /** Centre and spread of the first two fingers. */
+  function pinchOf() {
+    const [a, b] = touches.values();
+    return {
+      cx: (a.x + b.x) / 2,
+      cy: (a.y + b.y) / 2,
+      d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y))
+    };
+  }
+
+  /** Returns true when the move belonged to a finger, whether or not it moved the view. */
+  function onTouchMove(event) {
+    const finger = touches.get(event.pointerId);
+    if (!finger) return false;
+    if (!gesturing || touches.size < 2) {
+      finger.x = event.clientX;
+      finger.y = event.clientY;
+      return true;
+    }
+    const before = pinchOf();
+    finger.x = event.clientX;
+    finger.y = event.clientY;
+    const after = pinchOf();
+    // Scale about where the fingers were, then carry the view along with them.
+    zoomAt(before.cx, before.cy, after.d / before.d);
+    view = { ...view, x: view.x + after.cx - before.cx, y: view.y + after.cy - before.cy };
+    return true;
+  }
+
+  function onTouchUp(event) {
+    if (!touches.delete(event.pointerId)) return;
+    if (!touches.size) gesturing = false;
+  }
 
   /**
    * The cell under a pointer event. Outside the canvas this returns null, except with
@@ -1164,6 +1284,7 @@
       gridEl?.focus();
       if (event.button === 2) finishPath();
       else polyPoints = [...polyPoints, cell];
+      pathPointByTouch = event.pointerType === "touch";
       return;
     }
     // Capture on the canvas itself, not event.target: the target is a row <div> whose text is
@@ -1215,6 +1336,7 @@
     // Right button draws with the secondary character, mirroring Photoshop's background colour.
     strokeChar = event.button === 2 ? altChar : char;
     snapshot();
+    strokeUndoable = true;
 
     // Shift at press turns a freehand tool into a line: preview only, commit on release.
     straightMode = event.shiftKey && isBrush;
@@ -1297,10 +1419,43 @@
     end = cell;
   }
 
+  // Whether the in-progress stroke pushed an undo entry, so cancelling it can pop that back.
+  let strokeUndoable = false;
+  let pathPointByTouch = false;
+
+  /**
+   * Abandon whatever the pointer is in the middle of without committing it: a stroke goes
+   * back to the state it snapshotted, a marquee, move or shape preview simply drops, and a
+   * path vertex that a finger just planted is pulled out again.
+   */
+  function cancelStroke() {
+    if (isPath && pathPointByTouch) {
+      polyPoints = polyPoints.slice(0, -1);
+      pathPointByTouch = false;
+    }
+    if (!dragging) return;
+    if (strokeUndoable && undoStack.length) {
+      restoreState(undoStack[undoStack.length - 1]);
+      undoStack = undoStack.slice(0, -1);
+      coalescing = null;
+    }
+    strokeUndoable = false;
+    straightMode = false;
+    constrain = false;
+    dragging = false;
+    start = null;
+    end = null;
+    strokeChar = null;
+    marquee = null;
+    moving = null;
+    layerShift = null;
+  }
+
   function onPointerUp() {
     endPan();
     // Also fires from the window, so a release outside the canvas — or outside the browser —
     // still ends the drag. Without the guard the second delivery would re-commit the stroke.
+    strokeUndoable = false;
     if (!dragging) return;
     if ((isShape || straightMode) && preview.length) paint(preview);
     if (tool === "select") finishSelectDrag();
@@ -1792,9 +1947,9 @@
 
     // The canvas element's own background, so the image reads the way the editor does —
     // and so JPEG, which has no alpha, doesn't fall back to black.
-    ctx.fillStyle = gridEl
-      ? getComputedStyle(gridEl).backgroundColor
-      : "#1d1d1d";
+    ctx.fillStyle = getComputedStyle(gridEl ?? document.documentElement)
+      .getPropertyValue("--bg")
+      .trim();
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.scale(scale, scale);
@@ -2055,6 +2210,26 @@
     observer.observe(settingsEl);
     return () => observer.disconnect();
   });
+  // How far the toolbar's top edge sits above the app's bottom edge. The popover, toast and
+  // status hang off it, and it moves: the bar shrinks on a tablet, and gains a scrollbar's
+  // height where it has to scroll.
+  let aboveToolbar = $state(110);
+  $effect(() => {
+    const el = toolbarEl;
+    if (!el) return;
+    const measure = () => {
+      const app = el.offsetParent;
+      if (app) aboveToolbar = app.clientHeight - el.offsetTop;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  });
   const hasToolSettings = $derived(tool !== "move" && tool !== "fill");
   // Hidden is a one-shot dismissal of the popover: it survives until the user asks for a
   // panel again, so a panel that covers the artwork can be pushed out of the way in place.
@@ -2122,7 +2297,7 @@
   const showChar = (ch) => (ch === " " ? "SP" : ch);
 
   // ── Dock ───────────────────────────────────────────────────────────────────
-  const DOCK_WIDTH = 265;
+  const DOCK_WIDTH = 308;
 
   let collapsed = $state({}); // panel name -> collapsed, across the dock
   let panelPos = $state(null); // {x, y}; null until it's parked in its designed spot
@@ -2133,6 +2308,20 @@
     if (!panelPos)
       panelPos = { x: window.innerWidth - DOCK_WIDTH - 23, y: 26 };
   });
+
+  /**
+   * The dock keeps its distance from the nearer side of the window as the window resizes,
+   * so one parked at the right edge stays at the right edge; either way it stays on screen.
+   */
+  let lastWidth = window.innerWidth;
+  function followResize() {
+    const width = window.innerWidth;
+    if (panelPos && panelPos.x + DOCK_WIDTH / 2 > lastWidth / 2) {
+      panelPos = { ...panelPos, x: panelPos.x + width - lastWidth };
+    }
+    lastWidth = width;
+    clampPanel();
+  }
 
   /** Keep a dragged panel on screen when the window shrinks under it. */
   function clampPanel() {
@@ -2293,6 +2482,19 @@
     layers[index].color = color;
   }
 
+  // Layers painted from the palette follow it across: white ink becomes black ink, and the
+  // bright hues become their deep counterparts. Custom colours are the user's and stay put.
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    const from = THEME_PALETTES[theme];
+    const to = THEME_PALETTES[next];
+    for (const layer of layers) {
+      const i = from.indexOf(layer.color);
+      if (i !== -1) layer.color = to[i];
+    }
+    theme = next;
+  }
+
   const closeMenus = () => {
     menu = null;
     colorMenu = null;
@@ -2351,6 +2553,7 @@
         altChar,
         brushSize,
         boxStyle,
+        theme,
         pinned: $state.snapshot(pinned)
       }
     };
@@ -2370,8 +2573,9 @@
   onpointerup={onPointerUp}
   onpointercancel={onPointerUp}
   onresize={() => {
-    clampPanel();
+    followResize();
     placePopover();
+    if (!viewTouched) fitView();
   }}
   onbeforeunload={flushSave}
   onclick={closeMenus}
@@ -2517,7 +2721,7 @@
 {/snippet}
 
 {#snippet effectsPanel()}
-  <div class="settings-body">
+  <div class="settings-body effects">
     {#each TRANSFORMS as t}
       <label class="field" title={t.hint}>
         <span class="label">{t.label}</span>
@@ -2559,7 +2763,7 @@
 {/snippet}
 
 {#snippet canvasPanel()}
-  <div class="settings-body">
+  <div class="settings-body canvas">
     <div class="field">
       <span class="label">Cols</span>
       <input
@@ -2958,17 +3162,18 @@
   </div>
 {/snippet}
 
-<div class="app">
+<div class="app" style="--above-toolbar:{aboveToolbar}px">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="viewport"
     class:panning
     class:pannable={spaceHeld}
     bind:this={viewportEl}
+    onpointerdowncapture={onTouchDownCapture}
     onpointerdown={onViewPointerDown}
     onpointermove={onViewPointerMove}
-    onpointerup={endPan}
-    onpointercancel={endPan}
+    onpointerup={onViewPointerUp}
+    onpointercancel={onViewPointerUp}
   >
     <div
       class="stage"
@@ -3314,8 +3519,20 @@
         <span use:glitch={{ text: "About", live: brandHover || about }}>About</span>
       </button>
       <a class="brand-link" href={REPO_URL} target="_blank" rel="noopener">
-        <span use:glitch={{ text: "Source code", live: brandHover }}>Source code</span>
+        <span use:glitch={{ text: "GitHub", live: brandHover }}>GitHub</span>
       </a>
+      <button
+        class="brand-link"
+        title="Switch between the dark and light theme"
+        onclick={(e) => {
+          e.stopPropagation();
+          toggleTheme();
+        }}
+      >
+        <span use:glitch={{ text: theme === "dark" ? "Light" : "Dark", live: brandHover }}
+          >{theme === "dark" ? "Light" : "Dark"}</span
+        >
+      </button>
     </nav>
     {#if about}
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
@@ -3326,10 +3543,8 @@
           an image.
         </p>
         <p>It runs in your browser and keeps your work on this device.</p>
-        <p>
-          Made by <a href="https://github.com/PavelLaptev" target="_blank" rel="noopener"
-            >Pavel Laptev</a
-          >.
+        <p class="credit">
+          Creator: <a href="http://pavellaptev.me/" target="_blank" rel="noopener">Pavel Laptev</a>
         </p>
       </div>
     {/if}
@@ -3340,7 +3555,7 @@
     <span>{hover ? `${hover[0]}, ${hover[1]}` : "–"}</span>
     <button
       class="view-reset"
-      title="Reset pan and zoom (⌘0). Scroll to pan, pinch or ⌘-scroll to zoom, space or middle-drag to pan."
+      title="Fit the canvas on screen (⌘0). Scroll to pan, pinch or ⌘-scroll to zoom, space or middle-drag to pan; on touch, two fingers pan and pinch."
       onclick={resetView}>{Math.round(view.z * 100)}%</button
     >
   </div>
@@ -3350,10 +3565,17 @@
   .app {
     position: relative;
     height: 100vh;
+    height: 100dvh; /* the visible height on tablets, under the browser's own bars */
     overflow: hidden;
     background: var(--bg);
     color: var(--ink);
     font-family: var(--ui-font);
+    /* No double-tap zoom on the chrome, and no long-press callouts on iOS. */
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+    /* Everything above the toolbar keys off where its top edge lands — --above-toolbar is
+       measured and set inline — so a shorter bar, or one with a scrollbar, moves it all. */
+    --toolbar-bottom: 19px;
   }
 
   /* ── Canvas ──────────────────────────────────────────────────────────────── */
@@ -3419,7 +3641,7 @@
 
   .caret {
     position: absolute;
-    background: rgba(0, 234, 255, 0.45);
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
     pointer-events: none;
   }
 
@@ -3431,10 +3653,10 @@
     pointer-events: none;
     background-image: linear-gradient(
         to right,
-        rgba(255, 255, 255, 0.08) 1px,
+        color-mix(in srgb, var(--ink) 8%, transparent) 1px,
         transparent 1px
       ),
-      linear-gradient(to bottom, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+      linear-gradient(to bottom, color-mix(in srgb, var(--ink) 8%, transparent) 1px, transparent 1px);
   }
 
   /* Fill on every selected cell, but border only on the sides facing outwards —
@@ -3442,7 +3664,7 @@
   .sel-cell {
     position: absolute;
     pointer-events: none;
-    background: rgba(0, 234, 255, 0.18);
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
     border-style: solid;
     border-color: var(--accent);
   }
@@ -3450,7 +3672,7 @@
   .marquee {
     position: absolute;
     pointer-events: none;
-    background: rgba(0, 234, 255, 0.1);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
     border: 1px dashed var(--accent);
   }
 
@@ -3459,7 +3681,7 @@
   .guide {
     position: absolute;
     pointer-events: none;
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
   }
   .guide.row {
     left: 0;
@@ -3473,8 +3695,8 @@
   .hover-cell {
     position: absolute;
     pointer-events: none;
-    background: rgba(255, 255, 255, 0.1);
-    outline: 1px solid rgba(255, 255, 255, 0.45);
+    background: color-mix(in srgb, var(--ink) 10%, transparent);
+    outline: 1px solid color-mix(in srgb, var(--ink) 45%, transparent);
     outline-offset: -1px;
   }
 
@@ -3494,9 +3716,13 @@
 
   /* ── Floating panels ─────────────────────────────────────────────────────── */
 
-  /* Clicking shouldn't leave the browser's focus ring behind; keyboard focus still shows. */
+  /* Clicking shouldn't leave the browser's focus ring behind; keyboard focus still shows.
+     Nor should a tap flash the mobile browser's grey highlight. */
   button:focus:not(:focus-visible) {
     outline: none;
+  }
+  button {
+    -webkit-tap-highlight-color: transparent;
   }
 
   .panel {
@@ -3511,7 +3737,7 @@
     align-self: stretch;
     width: 1px;
     flex: none;
-    background: rgba(255, 255, 255, 0.2);
+    background: color-mix(in srgb, var(--ink) 20%, transparent);
   }
 
   .grip {
@@ -3526,7 +3752,7 @@
   /* Layers, plus any pinned panel, in one draggable right-hand column. */
   .dock {
     position: absolute;
-    width: 265px;
+    width: 308px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -3542,13 +3768,14 @@
     display: flex;
     flex-direction: column;
     /* Matches the dock width, so the panel is the same size wherever it lives. */
-    min-width: 265px;
+    min-width: 308px;
   }
   .panel-head {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px;
+    /* Same gutters as a popover's head, so a panel looks the same pinned or not. */
+    padding: 10px 10px 10px 16px;
     border-bottom: 1px solid var(--divider);
     cursor: grab;
     touch-action: none;
@@ -3592,7 +3819,7 @@
     cursor: pointer;
   }
   .layer-row:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: color-mix(in srgb, var(--ink) 5%, transparent);
   }
   .layer-row.active {
     background: var(--row-selected);
@@ -3617,7 +3844,7 @@
     cursor: pointer;
   }
   .layer-chip:hover {
-    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 35%, transparent);
   }
   /* Text layers regenerate from parameters rather than cells; the hollow chip says so. */
   .layer-chip.text {
@@ -3627,13 +3854,13 @@
   .layer-chip.text:hover {
     box-shadow:
       inset 0 0 0 2px var(--chip),
-      0 0 0 2px rgba(255, 255, 255, 0.35);
+      0 0 0 2px color-mix(in srgb, var(--ink) 35%, transparent);
   }
 
   .color-menu {
     z-index: 5;
     padding: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow);
   }
   .color-grid {
     display: grid;
@@ -3649,7 +3876,7 @@
     cursor: pointer;
   }
   .color-swatch:hover {
-    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 35%, transparent);
   }
   .color-swatch.active {
     box-shadow: 0 0 0 2px var(--ink);
@@ -3738,7 +3965,7 @@
     min-width: 150px;
     padding: 4px 0;
     z-index: 5;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow);
   }
   .menu button {
     text-align: left;
@@ -3765,7 +3992,7 @@
   .settings {
     left: 50%;
     transform: translateX(-50%);
-    bottom: 121px;
+    bottom: calc(var(--above-toolbar) + 11px);
     display: flex;
     flex-direction: column;
   }
@@ -3793,7 +4020,8 @@
     overflow-y: auto;
     padding: 16px;
   }
-  .settings-head + .settings-body {
+  .settings-head + .settings-body,
+  .panel-head + .settings-body {
     padding-top: 12px;
   }
 
@@ -3809,7 +4037,7 @@
     letter-spacing: -0.05em;
     text-transform: uppercase;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: none;
     opacity: 0.7;
     cursor: pointer;
@@ -3825,24 +4053,29 @@
     line-height: 1;
   }
 
-  /* Docked, a panel has 245px of usable width instead of ~640, so the roomy popover
-     measurements have to give. The dock itself scrolls rather than each panel. */
+  /* Docked, a panel keeps the popover's paddings and gaps — the dock is sized so its rows
+     still fit — but it takes the dock's width rather than its own, and the dock itself
+     scrolls rather than each panel. */
   .dock .settings-body {
     min-width: 0;
     max-width: none;
     max-height: none;
     overflow: visible;
-    gap: 6px;
-    padding: 10px;
   }
-  .dock .field {
-    gap: 10px;
+  /* Rows of checks and reset links can't shrink, so when they don't fit they break onto a
+     second line rather than pushing the dock into a sideways scroll. Slider and icon rows
+     stay on one line and shrink instead. */
+  .dock .field:has(.check, .ghost) {
+    flex-wrap: wrap;
+    row-gap: 4px;
   }
+  .dock .layers-body {
+    min-width: 0;
+  }
+  /* Not a look, a floor: a docked slider may shrink further than a popover one so the
+     widest label row still fits beside a classic scrollbar. */
   .dock .settings-body input[type="range"] {
-    min-width: 70px;
-  }
-  .dock .settings-body input[type="number"] {
-    width: 60px;
+    min-width: 90px;
   }
   .dock .palette-scroll {
     width: 100%;
@@ -3864,6 +4097,15 @@
     white-space: nowrap;
     flex: none;
   }
+  /* One label column per panel, so the sliders (and their zero marks) line up regardless
+     of whether the label is "Skew X" or the wider "Persp X". In the canvas panel only the
+     slider rows share it; the Cols/Rows pair keeps its own tighter spacing. */
+  .effects .label {
+    min-width: 7ch;
+  }
+  .canvas label.field .label {
+    min-width: 9ch;
+  }
   .value {
     margin-left: auto;
     font-size: 13px;
@@ -3880,10 +4122,7 @@
     width: 100%;
     margin: 6px 0;
     border: 0;
-    border-top: 1px solid rgba(255, 255, 255, 0.12);
-  }
-  .dock .sep {
-    margin: 2px 0;
+    border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
   }
   .note {
     margin: 0;
@@ -3899,7 +4138,7 @@
     white-space: pre-line;
   }
   .note.warn {
-    color: #e0c169;
+    color: var(--warn);
   }
 
   /* Slider, rebuilt from the design's 2px track and 12×28 handle. */
@@ -3969,8 +4208,9 @@
     -webkit-appearance: none;
     appearance: none;
     padding-right: 26px;
-    /* The layers panel's chevron, turned to point down. */
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath transform='rotate(180 12 12)' d='M20.5303 15.4697L19.4697 16.5303L12 9.06055L4.53027 16.5303L3.46973 15.4697L12 6.93945L20.5303 15.4697Z' fill='white'/%3E%3C/svg%3E");
+    /* The layers panel's chevron, turned to point down. A data URI can't read --ink, so the
+       token in app.css carries one image per theme. */
+    background-image: var(--select-chevron);
     background-repeat: no-repeat;
     background-position: right 6px center;
     background-size: 14px;
@@ -4028,7 +4268,7 @@
     letter-spacing: -0.05em;
     text-transform: uppercase;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: none;
     opacity: 0.7;
     cursor: pointer;
@@ -4038,7 +4278,7 @@
   }
   .segmented button.active {
     background: var(--accent);
-    color: #000;
+    color: var(--on-accent);
     opacity: 1;
   }
   /* Arrow-only segments: a fixed square rather than text padding. */
@@ -4049,6 +4289,8 @@
   }
   .shape-row {
     gap: 2px;
+    /* A little air under the picker before the shape's own settings start. */
+    margin-bottom: 8px;
   }
   .shape-btn {
     width: 32px;
@@ -4057,7 +4299,7 @@
     place-items: center;
     padding: 0;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: none;
     opacity: 0.7;
     cursor: pointer;
@@ -4067,7 +4309,7 @@
   }
   .shape-btn.active {
     background: var(--accent);
-    color: #000;
+    color: var(--on-accent);
     opacity: 1;
   }
   .segmented em {
@@ -4083,7 +4325,7 @@
     letter-spacing: -0.05em;
     text-transform: uppercase;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: none;
     cursor: pointer;
   }
@@ -4095,7 +4337,7 @@
   }
   .wide:hover:not(:disabled),
   .ghost:hover {
-    background: rgba(255, 255, 255, 0.16);
+    background: color-mix(in srgb, var(--ink) 16%, transparent);
   }
   .wide:disabled {
     opacity: 0.3;
@@ -4121,7 +4363,7 @@
     break-inside: avoid;
   }
   details {
-    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
   }
   summary {
     list-style: none;
@@ -4164,16 +4406,16 @@
     font-family: var(--art-font);
     font-size: 13px;
     color: var(--ink);
-    background: rgba(255, 255, 255, 0.08);
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
     border: none;
     cursor: pointer;
   }
   .swatch-btn:hover {
-    background: rgba(255, 255, 255, 0.2);
+    background: color-mix(in srgb, var(--ink) 20%, transparent);
   }
   .swatch-btn.active {
     background: var(--accent);
-    color: #000;
+    color: var(--on-accent);
   }
 
   /* ── Toolbar ─────────────────────────────────────────────────────────────── */
@@ -4182,14 +4424,29 @@
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
-    bottom: 19px;
+    bottom: var(--toolbar-bottom);
     display: flex;
     align-items: center;
     gap: 16px;
     padding: 6px;
     max-width: calc(100vw - 32px);
-    overflow-x: auto;
     background: var(--panel);
+    user-select: none;
+    -webkit-user-select: none;
+    /* Where it can't fit, the bar scrolls sideways with no scrollbar and snaps a button to
+       its left edge, so a swipe always lands on whole tools. */
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 6px;
+    overscroll-behavior-x: contain;
+  }
+  .toolbar::-webkit-scrollbar {
+    display: none;
+  }
+  .toolbar .chars,
+  .toolbar .tool {
+    scroll-snap-align: start;
   }
 
   .chars {
@@ -4271,7 +4528,7 @@
   }
   .tool.active {
     background: var(--accent);
-    color: #000;
+    color: var(--on-accent);
     opacity: 1;
   }
   /* A panel button whose panel is pinned in the dock: a thin accent frame and a dot in the
@@ -4321,12 +4578,16 @@
     margin-top: 4px;
     opacity: 1;
   }
-  /* No hover on touch: keep every label visible there. */
+  /* No hover on touch: keep every label visible there, and drop the shortcut keys — there is
+     no keyboard to press them on, and the labels have less room. */
   @media (hover: none) {
     .tool-label {
       height: 15px;
       margin-top: 4px;
       opacity: 1;
+    }
+    .tool-label em {
+      display: none;
     }
   }
   .tool-label em {
@@ -4401,7 +4662,7 @@
     width: 260px;
     padding: 12px 14px;
     line-height: 1.4;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow);
   }
   .about p {
     margin: 0 0 8px;
@@ -4409,14 +4670,26 @@
   .about p:last-child {
     margin-bottom: 0;
   }
+  .about .credit {
+    color: var(--ink-dim);
+  }
   .about a {
     color: var(--accent);
   }
+  /* Nothing to hover on touch: the links stay out. */
+  @media (hover: none) {
+    .brand-links {
+      opacity: 1;
+      transform: none;
+      pointer-events: auto;
+    }
+  }
+
 
   .status {
     position: absolute;
     left: 23px;
-    bottom: 19px;
+    bottom: var(--toolbar-bottom);
     display: flex;
     gap: 16px;
     font-size: 11px;
@@ -4443,13 +4716,35 @@
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
-    bottom: 121px;
+    bottom: calc(var(--above-toolbar) + 11px);
     z-index: 6;
     padding: 10px 16px;
     font-size: 12px;
     text-transform: uppercase;
-    color: #000;
+    color: var(--on-accent);
     background: var(--accent);
     pointer-events: none;
+  }
+
+  /* ── Tablet ────────────────────────────────────────────────────────────────── */
+
+  /* Under about 1100px — an iPad in either orientation — the toolbar keeps its designed size
+     and scrolls sideways instead. The bar now spans the full width and the popover above it
+     can land anywhere along it, so the status line moves underneath the bar, which lifts by
+     one line to make room above the safe area. */
+  @media (max-width: 1100px) {
+    .app {
+      --toolbar-bottom: calc(30px + env(safe-area-inset-bottom, 0px));
+    }
+    .viewport {
+      padding: 96px 16px calc(var(--above-toolbar) + 24px);
+    }
+    .toolbar {
+      max-width: calc(100vw - 16px);
+    }
+    .status {
+      left: 16px;
+      bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    }
   }
 </style>

@@ -441,9 +441,9 @@ export function diamondVertices(x0, y0, x1, y1) {
 }
 
 const BOX = {
-  ascii: { h: '-', v: '|', tl: '+', tr: '+', bl: '+', br: '+' },
-  single: { h: '─', v: '│', tl: '┌', tr: '┐', bl: '└', br: '┘' },
   double: { h: '═', v: '║', tl: '╔', tr: '╗', bl: '╚', br: '╝' },
+  single: { h: '─', v: '│', tl: '┌', tr: '┐', bl: '└', br: '┘' },
+  ascii: { h: '-', v: '|', tl: '+', tr: '+', bl: '+', br: '+' },
   round: { h: '─', v: '│', tl: '╭', tr: '╮', bl: '╰', br: '╯' },
 }
 
@@ -460,7 +460,7 @@ export const BOX_STYLES = Object.keys(BOX)
  * Vertices are then resolved against the segments either side of them, which is where the
  * corner glyphs come from.
  */
-export function polylineGlyphs(vertices, style = 'single') {
+export function polylineGlyphs(vertices, style = 'double') {
   const box = BOX[style] ?? BOX.single
   const diagonal = (dx, dy) => (dx * dy < 0 ? '/' : '\\')
   const points = vertices.filter(

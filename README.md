@@ -43,6 +43,10 @@ is armed, so they have nowhere fixed to live.
 Undo, redo and the clipboard have no buttons — they're keyboard-only. **Export** and **Clear**
 live at the foot of the **Canvas** panel.
 
+Hover the **ASKI** wordmark, top left, for **About**, **GitHub**, and the theme switch:
+**Light** flips the editor to a light theme, the dark one's opposite, and **Dark** brings it
+back. The choice is remembered with the session.
+
 ## Tools
 
 Each tool's shortcut is in parentheses. Shortcuts work whenever the app has focus, except
@@ -164,7 +168,10 @@ outside.
 - The footer buttons are **new layer**, **duplicate**, and **delete**. A **new text layer**
   comes from the Font tool's settings panel.
 - The chip beside each name is the layer's **colour** — click it for a palette, or **Custom**
-  for anything else. Everything the layer draws renders in that colour; new layers start white.
+  for anything else. Everything the layer draws renders in that colour; new layers start in the
+  theme's ink — white on dark, black on light. Switching theme carries palette colours across
+  to their counterparts in the other set (so white ink becomes black, not invisible); custom
+  colours are left alone.
   The chip is solid for a painted layer and hollow for a [text layer](#text-layers).
 
 Colour is a view property: export is plain text, so it carries characters only. Merging down
@@ -390,6 +397,14 @@ There is no file import: pasting is the way text gets in.
 
 With the Text tool and an active caret, typing inserts characters; `Enter` returns to the
 column you clicked, and `Backspace` erases the cell to the left.
+
+## Tablets
+
+Where the toolbar doesn't fit, it scrolls sideways and snaps to whole buttons, and a canvas
+wider than the screen opens zoomed out to fit (`Cmd/Ctrl+0` or the zoom readout refits it). One finger works the armed tool; two fingers pan and pinch-zoom the
+view. A stroke the first finger had started is dropped the moment the second one lands, so a
+pan never leaves a mark. A pen draws with pressure as usual, and a resting finger doesn't
+interrupt it.
 
 ## How it works
 

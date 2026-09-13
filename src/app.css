@@ -1,21 +1,48 @@
 /* Design tokens, straight off the Figma file. There are no Figma variables behind the
-   design, so the raw hexes are named here once and referenced everywhere else. */
+   design, so the raw hexes are named here once and referenced everywhere else.
+
+   Two themes: the dark one is the design; the light one is its opposite — neutrals
+   inverted, the cyan pulled down until it reads on a pale ground. The editor stamps
+   `data-theme` on <html>; with no stamp, dark is what you get. */
 :root {
   --bg: #1d1d1d;
   --panel: #383838;
   --panel-alt: #424242;
   --accent: #00eaff;
+  --on-accent: #000000; /* text sat on an accent fill */
   --ink: #ffffff;
   --ink-dim: rgba(255, 255, 255, 0.5);
   --ink-faint: rgba(255, 255, 255, 0.3);
   --hairline: rgba(255, 255, 255, 0.4);
   --divider: rgba(255, 255, 255, 0.12);
   --row-selected: rgba(255, 255, 255, 0.1);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --warn: #e0c169;
+  /* The <select> drop-down arrow. It's a background image, which can't take --ink, so each
+     theme carries its own copy in that theme's ink. */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath transform='rotate(180 12 12)' d='M20.5303 15.4697L19.4697 16.5303L12 9.06055L4.53027 16.5303L3.46973 15.4697L12 6.93945L20.5303 15.4697Z' fill='white'/%3E%3C/svg%3E");
 
   --ui-font: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   /* The canvas keeps a system monospace stack: it has to carry box-drawing and block
      glyphs, which a display webfont can silently drop. */
   --art-font: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:root[data-theme='light'] {
+  --bg: #e2e2e2;
+  --panel: #c7c7c7;
+  --panel-alt: #bdbdbd;
+  --accent: #2f6d87; /* the light favicon's teal */
+  --on-accent: #ffffff;
+  --ink: #000000;
+  --ink-dim: rgba(0, 0, 0, 0.5);
+  --ink-faint: rgba(0, 0, 0, 0.3);
+  --hairline: rgba(0, 0, 0, 0.4);
+  --divider: rgba(0, 0, 0, 0.12);
+  --row-selected: rgba(0, 0, 0, 0.1);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --warn: #8a6a00;
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath transform='rotate(180 12 12)' d='M20.5303 15.4697L19.4697 16.5303L12 9.06055L4.53027 16.5303L3.46973 15.4697L12 6.93945L20.5303 15.4697Z' fill='black'/%3E%3C/svg%3E");
 }
 
 * {
@@ -29,7 +56,15 @@ body {
   /* The editor manages its own scrolling; the page itself never scrolls. */
   overflow: hidden;
   background: var(--bg);
+  color: var(--ink);
   color-scheme: dark;
+}
+
+/* On <html> as well as <body>, so the browser's own defaults (CanvasText, scrollbars, the
+   <select> popup) pick the light side too. */
+:root[data-theme='light'],
+:root[data-theme='light'] body {
+  color-scheme: light;
 }
 
 #app {

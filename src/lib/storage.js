@@ -103,6 +103,7 @@ function sanitizePrefs(raw) {
   }
   // Validated against the real option lists by the editor, which owns them.
   if (typeof raw.boxStyle === 'string') prefs.boxStyle = raw.boxStyle
+  if (raw.theme === 'dark' || raw.theme === 'light') prefs.theme = raw.theme
   if (Array.isArray(raw.pinned)) prefs.pinned = raw.pinned.filter((n) => typeof n === 'string')
   return prefs
 }
