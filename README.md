@@ -1,8 +1,8 @@
-# Askew
+# ASKI
 
 **An ASCII graphics tool.**
 
-Askew is a layered ASCII art editor built with Svelte 5 and Vite. Draw with characters instead of
+ASKI is a layered ASCII art editor built with Svelte 5 and Vite. Draw with characters instead of
 pixels: freehand and shape tools, a pressure-sensitive brush for pen tablets, layers with
 transparency, selections you can move, and plain-text export.
 
