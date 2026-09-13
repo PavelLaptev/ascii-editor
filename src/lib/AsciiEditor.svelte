@@ -157,7 +157,9 @@
   function applyTheme(t) {
     document.documentElement.dataset.theme = t;
     const icon = document.querySelector("link[rel='icon']");
-    if (icon) icon.href = t === "light" ? "/favicon-light.svg" : "/favicon.svg";
+    // BASE_URL, not "/": on GitHub Pages the app lives under a subpath.
+    if (icon)
+      icon.href = import.meta.env.BASE_URL + (t === "light" ? "favicon-light.svg" : "favicon.svg");
   }
   applyTheme(theme);
   $effect(() => applyTheme(theme));
