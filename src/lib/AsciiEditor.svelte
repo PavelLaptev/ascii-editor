@@ -3445,7 +3445,7 @@
         >
           <Icon name={t.icon} size={34} />
           <span class="tool-label">
-            <span use:glitch={{ text: t.label, live: tool === t.id }}>{t.label}</span>
+            <span>{t.label}</span>
             <em>{t.key}</em>
           </span>
         </button>
@@ -3468,9 +3468,7 @@
         >
           <Icon name={t.icon} size={34} />
           <span class="tool-label">
-            <span use:glitch={{ text: label, live: isShapeButton ? inShapeGroup : tool === t.id }}>
-              {label}
-            </span>
+            <span>{label}</span>
             <em>{isShapeButton ? shapeButton.key : t.key}</em>
           </span>
         </button>
@@ -3490,7 +3488,7 @@
       >
         <Icon name="layers" size={34} />
         <span class="tool-label">
-          <span use:glitch={{ text: "Layers", live: panelPopped("layers") }}>Layers</span>
+          <span>Layers</span>
         </span>
       </button>
       <button
@@ -3503,7 +3501,7 @@
       >
         <Icon name="fx" size={34} />
         <span class="tool-label">
-          <span use:glitch={{ text: "Effects", live: panelPopped("effects") }}>Effects</span>
+          <span>Effects</span>
         </span>
       </button>
       <button
@@ -3516,7 +3514,7 @@
       >
         <Icon name="canvas" size={34} />
         <span class="tool-label">
-          <span use:glitch={{ text: "Canvas", live: panelPopped("canvas") }}>Canvas</span>
+          <span>Canvas</span>
         </span>
       </button>
     </div>

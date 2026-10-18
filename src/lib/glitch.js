@@ -1,6 +1,6 @@
 // Decode-style scramble for short labels: the text appears as random ASCII glyphs that
-// resolve, left to right, into the real word. Used on the toolbox labels, which only show
-// on hover or while the tool is armed, so the reveal doubles as the reveal animation.
+// resolve, left to right, into the real word. Used on the brand menu, whose links only
+// show on hover, so the reveal doubles as their animation.
 
 const GLYPHS = "#%&*+-/<=>?@[]^_{|}~░▒▓█";
 const DURATION = 360; // ms, whole word settled
