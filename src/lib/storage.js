@@ -87,6 +87,7 @@ const PREF_RANGES = {
   letterSpacing: [-2, 16],
   lineHeight: [0.6, 3],
   brushSize: [1, 9],
+  brushToolSize: [1, 9],
 }
 
 function sanitizePrefs(raw) {

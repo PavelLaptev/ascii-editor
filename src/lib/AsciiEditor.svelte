@@ -433,7 +433,7 @@
       id: nextLayerId++,
       name: "Text",
       visible: true,
-      color: DEFAULT_INK,
+      color: randomLayerColor(),
       ox: 0,
       oy: 0,
       grid: [],
@@ -640,7 +640,7 @@
   let pressureSize = $state(true);
   let pressureDensity = $state(true);
   let rampName = $state("ASCII");
-  let dynamics = $state("pressure"); // what drives the brush: 'pressure' | 'speed' | 'off'
+  let dynamics = $state("speed"); // what drives the brush: 'pressure' | 'speed' | 'off'
 
   // Diagnostics for the last stroke, so it's obvious what the tablet is actually reporting.
   let pointerKind = $state(null);
@@ -655,7 +655,9 @@
   let lineHeight = $state(prefs.lineHeight ?? 1.2);
   let showGrid = $state(prefs.showGrid ?? true);
   let showGuides = $state(prefs.showGuides ?? false); // row and column bands under the cursor
-  let brushSize = $state(prefs.brushSize ?? 1);
+  let brushSize = $state(prefs.brushSize ?? 1); // pencil, eraser and line
+  // The brush keeps its own, larger size, so pressure has room to vary it from the first stroke.
+  let brushToolSize = $state(prefs.brushToolSize ?? 5);
   // Which palette groups are expanded; the rest stay collapsed to keep the palette short.
   let openGroups = $state({ "Blocks & shades": true, "Box — single": true });
 
@@ -695,8 +697,14 @@
   );
   // Line strokes are stamped with the same brush, so it takes a size too.
   const usesSize = $derived(isBrush || tool === "line");
+  // The size the size slider and [ ] act on: the brush's own, or the shared one.
+  const toolSize = $derived(tool === "brush" ? brushToolSize : brushSize);
+  function setToolSize(size) {
+    if (tool === "brush") brushToolSize = size;
+    else brushSize = size;
+  }
   // The hover outline traces the brush footprint, so only sized tools widen it.
-  const brushSpan = $derived(usesSize ? brushSize : 1);
+  const brushSpan = $derived(usesSize ? toolSize : 1);
   const brushOffset = $derived(Math.floor((brushSpan - 1) / 2));
   const selKeys = $derived(
     new Set((selection ?? []).map(([x, y]) => `${x},${y}`))
@@ -1070,7 +1078,7 @@
   });
 
   const sizeFor = (p) =>
-    pressureSize ? Math.max(1, Math.round(p * brushSize)) : brushSize;
+    pressureSize ? Math.max(1, Math.round(p * brushToolSize)) : brushToolSize;
 
   function charFor(p) {
     if (!pressureDensity) return strokeChar ?? char;
@@ -1705,7 +1713,7 @@
       return;
     }
     if (key === "[" || key === "]") {
-      brushSize = Math.min(9, Math.max(1, brushSize + (key === "]" ? 1 : -1)));
+      setToolSize(Math.min(9, Math.max(1, toolSize + (key === "]" ? 1 : -1))));
       return;
     }
     if (key === "g") {
@@ -1729,6 +1737,15 @@
     if (shortcut) tool = shortcut;
   }
 
+  /**
+   * A random hue for a new layer, skipping the plain inks and the active layer's colour so
+   * the new one stands apart from what it's stacked on.
+   */
+  function randomLayerColor() {
+    const hues = LAYER_COLORS.slice(2).filter((c) => c !== layers[activeIndex]?.color);
+    return hues[Math.floor(Math.random() * hues.length)];
+  }
+
   /** A blank painted layer the size of the canvas, named after its id. */
   function newLayer() {
     const id = nextLayerId++;
@@ -1736,7 +1753,7 @@
       id,
       name: `Layer ${id}`,
       visible: true,
-      color: DEFAULT_INK,
+      color: randomLayerColor(),
       ox: 0,
       oy: 0,
       grid: makeGrid(cols, rows)
@@ -2554,6 +2571,7 @@
         char,
         altChar,
         brushSize,
+        brushToolSize,
         boxStyle,
         theme,
         pinned: $state.snapshot(pinned)
@@ -3115,8 +3133,13 @@
         <span class="label"
           >{t === "brush" && pressureSize ? "Max size" : "Size"}</span
         >
-        <input type="range" min="1" max="9" bind:value={brushSize} />
-        <span class="value">{brushSize}×{brushSize}</span>
+        <input
+          type="range"
+          min="1"
+          max="9"
+          bind:value={() => toolSize, setToolSize}
+        />
+        <span class="value">{toolSize}×{toolSize}</span>
       </label>
       {#if t === "brush"}
         <hr class="sep" />
